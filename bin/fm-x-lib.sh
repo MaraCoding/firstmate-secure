@@ -242,6 +242,12 @@ fmx_load_config() {
   else
     FMX_TOKEN=$(fmx_env_get FMX_PAIRING_TOKEN "$env_file")
   fi
+  # Airgap kill switch: an empty token is the existing hard no-op for poll,
+  # reply, dismiss and relay-context, so clearing it here covers the
+  # environment-wins path that fmx_env_get cannot see.
+  if fm_airgap_active "$FM_HOME"; then
+    FMX_TOKEN=
+  fi
   if [ -n "${FMX_RELAY_URL+x}" ]; then
     FMX_RELAY=${FMX_RELAY_URL-}
   else
@@ -854,6 +860,9 @@ fmx_reply_outbox_json() {
 
 fmx_post_json() (
   local endpoint=$1 payload_file=$2 body_file=${3:-/dev/null} auth_header_file code rc
+  # Airgap: refuse at the one function every relay POST goes through, so no
+  # caller that resolved a token some other way can reach the network.
+  fm_airgap_active && return 4
   command -v curl >/dev/null 2>&1 || return 127
   [ -r "$payload_file" ] || return 2
   auth_header_file=$(fmx_auth_header_file) || return 3

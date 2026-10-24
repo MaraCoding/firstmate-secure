@@ -120,6 +120,15 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+# ---- airgap kill switch (bin/fm-airgap-lib.sh) ---------------------------------
+# Checked before the key so an environment-supplied key is ignored too. Same
+# exit and same stderr shape as the absent-key off path: nothing sent, exit 0.
+if fm_airgap_active "$FM_HOME"; then
+  TYPESAFE_API_KEY_PRIVATE=
+  echo "dispatch-resolve: off (airgap: $(fm_airgap_reason); nothing sent)" >&2
+  exit 0
+fi
+
 # ---- opt-in gate ---------------------------------------------------------------
 if [ -z "$TYPESAFE_API_KEY_PRIVATE" ]; then
   TYPESAFE_API_KEY_PRIVATE=$(fmx_env_get TYPESAFE_API_KEY "$FM_HOME/.env")

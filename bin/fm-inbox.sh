@@ -128,6 +128,27 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
 die() { printf 'fm-inbox: %s\n' "$*" >&2; exit 1; }
 
+# Airgap kill switch (contract: bin/fm-airgap-lib.sh): the two model-backed
+# subcommands send audio or a question to Bedrock, so they are refused outright.
+# Every other subcommand makes no network call and is untouched. This file is
+# deliberately self-contained (it is copied out alone by callers and tests), so
+# it carries its own copy of the two-line rule rather than sourcing a library.
+# Checked before any region/model resolution so the refusal names the switch,
+# not a missing config file.
+fm_airgap_active() {
+  case "$(printf '%s' "${FM_AIRGAP:-}" | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|on) return 0 ;;
+  esac
+  [ -e "$CONFIG/airgap" ]
+}
+airgap_refuse() {  # <what>
+  fm_airgap_active || return 0
+  case "$(printf '%s' "${FM_AIRGAP:-}" | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|on) die "off (airgap: FM_AIRGAP is set; $1 sends data to Bedrock and is refused; nothing sent)" ;;
+    *) die "off (airgap: $CONFIG/airgap is present; $1 sends data to Bedrock and is refused; nothing sent)" ;;
+  esac
+}
+
 # First non-comment, non-blank line of a config file, or nothing.
 read_setting() {  # <file-name>
   local path="$CONFIG/$1" line
@@ -161,6 +182,7 @@ PROFILE="${FM_INBOX_PROFILE-$(read_setting inbox-profile)}"
 # reply, receipts, ready, status, list and drain keep working in a home that
 # has configured nothing.
 need_region() {
+  airgap_refuse "this subcommand"
   [ -n "$REGION" ] || REGION=$(require_setting inbox-region FM_INBOX_REGION "AWS region")
 }
 
@@ -184,6 +206,7 @@ need() { command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"
 # ambient ones win. Set FM_INBOX_PROFILE= (empty) to force that even without env
 # credentials present.
 aws_call() {
+  airgap_refuse "aws $1"
   if [ -z "$PROFILE" ] || [ -n "${AWS_ACCESS_KEY_ID:-}" ]; then
     aws --region "$REGION" "$@"
   else

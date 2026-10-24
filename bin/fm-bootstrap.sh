@@ -1616,6 +1616,12 @@ if network_phase; then
   fm_timing_record phase gh-auth "$__fm_timing_stamp"
 fi
 local_phase && detect_local_config
+# Airgap kill switch (bin/fm-airgap-lib.sh): a detection line, printed in every
+# mode including detect-only, so the operator can see that Relay, typed dispatch
+# and Bedrock refuse before any network call in this home.
+if local_phase && fm_airgap_active "$FM_HOME"; then
+  echo "AIRGAP: on ($(fm_airgap_reason)) - Relay, typesafe dispatch and Bedrock paths refuse before any network call"
+fi
 
 if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   # secondmate_sync consumes SECONDMATE_RESPAWNED_IDS from the liveness sweep, so
@@ -1656,6 +1662,8 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
     fi
   fi
   # x_mode_setup writes local Relay artifacts only and never leaves the machine.
+  # Under airgap it reads no token (bin/fm-airgap-lib.sh) and so removes any
+  # Relay artifacts a previous non-airgap session armed.
   local_phase && x_mode_setup
   # Adopt existing durable contribution links without making a network call.
   # Detection-only startup must never publish a check registration.

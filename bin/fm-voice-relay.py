@@ -1200,6 +1200,18 @@ def parse_args(argv):
     return options
 
 
+def airgap_active(home):
+    """Mirror bin/fm-airgap-lib.sh: FM_AIRGAP truthy, or <home>/config/airgap.
+
+    The relay is the one Python entry point that reaches a third party, so it
+    carries its own copy of the two-line rule rather than shelling out for it.
+    """
+    if os.environ.get("FM_AIRGAP", "").strip().lower() in ("1", "true", "yes", "on"):
+        return True
+    config = os.environ.get("FM_CONFIG_OVERRIDE") or os.path.join(home, "config")
+    return os.path.exists(os.path.join(config, "airgap"))
+
+
 def resolve_settings(options):
     """Fill in what this home configures, refusing rather than guessing.
 
@@ -1209,6 +1221,10 @@ def resolve_settings(options):
     """
     home = options.home or records.default_home()
     options.home = home
+    if airgap_active(home):
+        raise records.RecordError(
+            "off (airgap: FM_AIRGAP or {}/config/airgap; the voice relay sends "
+            "audio to Bedrock and is refused; nothing sent)".format(home))
     if not options.region:
         options.region = records.require_setting(home, *SETTINGS["region"])
     if not options.model:

@@ -105,6 +105,9 @@ FM_PF_EVENT_BYTES_MAX=${FM_PF_EVENT_BYTES_MAX:-8192}
 # fmx_load_config, so a direct client call and this gate agree.
 fm_pf_relay_active() {
   local home=$1 token
+  # Airgap kill switch (bin/fm-airgap-lib.sh): never active, whatever .env or
+  # the environment carry, matching fmx_load_config's cleared token.
+  fm_airgap_active "$home" && return 1
   if [ -n "${FMX_PAIRING_TOKEN+x}" ]; then
     [ -n "${FMX_PAIRING_TOKEN-}" ]
     return $?

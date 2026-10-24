@@ -1,0 +1,53 @@
+# docs/egress-allowlist.txt - every network destination firstmate may name or reach.
+#
+# Format: <host> <class> <why>   (one per line; # comments; blank lines ignored)
+# A host entry also covers its subdomains. Two tools read the first two columns:
+#   tests/fm-egress-allowlist.test.sh  every hostname in the code and harness
+#                                      directories must appear here (static)
+#   bin/fm-egress-audit.sh             every remote connect() a traced run makes
+#                                      must resolve to a host here (runtime)
+# A merge from upstream that introduces a new host fails the static test until
+# someone classifies it on a line below. That is the point: no endpoint lands
+# unread. Classes:
+#   forge         the git forge firstmate works against (gh, git over https)
+#   provider      the model provider the primary and workers are logged into
+#   guarded       opt-in third party; refused unconditionally under airgap
+#                 (docs/airgap.md), reachable only with a credential AND no airgap
+#   install-hint  printed as an install instruction; firstmate never fetches it
+#   browser-asset fetched by the operator's browser when a generated page renders
+#   doc           appears only in comments, docs, DTD/namespace strings, or fixtures
+
+# --- forge -------------------------------------------------------------------
+github.com            forge        gh, git, release downloads, status checks
+githubusercontent.com forge        raw.githubusercontent.com: printed install hint for no-mistakes
+githubstatus.com      doc          matched inside a gh error message, never fetched
+
+# --- provider (runtime audit only; not named in firstmate's own code) ----------
+openai.com            provider     openai-codex login and completions (Pi primary and workers)
+chatgpt.com           provider     openai-codex OAuth and backend endpoints
+anthropic.com         provider     Claude harness, quota-axi usage endpoint
+claude.ai             provider     Claude harness login
+
+# --- guarded: refuse under airgap -------------------------------------------
+myfirstmate.io        guarded      Relay (public X/Discord mentions); needs FMX_PAIRING_TOKEN
+api.typesafe.ai       guarded      dispatch classifier; needs TYPESAFE_API_KEY; sends brief text
+amazonaws.com         guarded      Bedrock for voice relay and inbox say/ask; needs AWS config
+
+# --- install hints: printed by bootstrap, never fetched by firstmate ----------
+kunchenguid.github.io install-hint treehouse installer URL printed by fm-bootstrap
+cmux.com              install-hint cmux backend
+herdr.dev             install-hint herdr backend
+paseo.sh              install-hint paseo backend
+superlogical.com      install-hint rex backend
+cursor.com            install-hint cursor-agent harness
+zellij.dev            install-hint zellij backend
+
+# --- browser assets ----------------------------------------------------------
+fonts.googleapis.com  browser-asset bearings board template imports Google Fonts when opened in a browser
+
+# --- doc / fixture strings ---------------------------------------------------
+code.claude.com       doc          Claude Code docs links in comments
+apple.com             doc          plist DTD string in launchd templates
+w3.org                doc          SVG namespace inside an inline data URI
+auth.meta.com         doc          muse harness sign-in URL quoted in adapter notes
+example.test          doc          test fixture URLs
