@@ -42,8 +42,17 @@ so adding a fourth opt-in third party forces a matching refusal and test.
 
 **Runtime.** `bin/fm-egress-audit.sh -- <command>` runs a command under
 `strace`, reduces the trace to the distinct remote endpoints it connected to,
-and judges each against the same allowlist. The trace and report are kept
-under `state/egress-audit/<stamp>/` as evidence. A typical proof run:
+and judges each against the same allowlist by the name the process itself
+looked up. The judge reads the lookups out of the same trace, from
+systemd-resolved's local socket or from DNS packets to the `resolv.conf`
+nameserver, and trusts an answer only when it arrived on a socket the process
+opened to that resolver. Reverse DNS is never used to clear a host, because
+the owner of a destination address controls its PTR record and could point it
+at any allowlisted name; it appears only as a `ptr=` side note. An endpoint
+the process never looked up (a static binary with its own resolver, or
+DNS-over-HTTPS) is reported as `no lookup seen` and fails the run until a
+human reads the trace. The trace, endpoint table and report are kept under
+`state/egress-audit/<stamp>/` as evidence. A typical proof run:
 
 ```sh
 touch config/airgap
