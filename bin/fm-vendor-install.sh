@@ -6,8 +6,12 @@
 #   fm-vendor-install.sh [--vendor <dir>] [--bin-dir <dir>] [--airgap] [--check]
 #
 # The vendor directory (default $FM_VENDOR_DIR, then ~/firstmate-vendor) holds:
-#   npm/*.tgz + npm/SHA256SUMS       tasks-axi quota-axi gh-axi lavish-axi
-#                                    chrome-devtools-axi axi-sdk-js (npm pack output)
+#   npm/*.tgz + npm/SHA256SUMS       tasks-axi quota-axi gh-axi chrome-devtools-axi
+#                                    axi-sdk-js (npm pack output) and lavish-local,
+#                                    the offline replica that provides the
+#                                    `lavish-axi` bin (docs/airgap.md "Toolchain");
+#                                    never the stock lavish-axi tarball, which
+#                                    would claim the same bin name and phone home
 #   bin/treehouse-*.tar.gz           treehouse release tarball
 #   bin/no-mistakes-nda-safe-*       no-mistakes rebuilt without telemetry
 #                                    (README-no-mistakes.md beside it owns the recipe)

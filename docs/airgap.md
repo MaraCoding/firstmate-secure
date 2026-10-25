@@ -89,6 +89,21 @@ binary, `NO_MISTAKES_TELEMETRY=off` and `NO_MISTAKES_NO_UPDATE_CHECK=1` in the
 environment and in the daemon's systemd unit stop both calls; the rebuild makes
 that unconditional.
 
+Stock `lavish-axi`, the review surface behind `/bearings lavish`, reports every
+CLI invocation to `a.kunchenguid.com` (Umami; opt-out `LAVISH_AXI_TELEMETRY=off`),
+can publish artifacts to the third-party host ht-ml.app, and resolves its own
+Tailscale MagicDNS name on every open. The airgapped install therefore uses
+`lavish-local`, an offline replica that keeps the binary name `lavish-axi`, the
+`--version` gate, the session-key derivation, the `state.json` layout and the
+TOON wire shapes this repo's `bin/fm-bearings-board.sh` and
+`bin/fm-procevent-lavish.sh` are written against, so no script here changes.
+It ships as `npm/lavish-local-1.0.0.tgz` in the vendor directory; its own README
+owns the contract table and the upstream invariants it ports. On a machine that
+also has the stock package installed, `~/.local/bin/lavish-axi` must resolve to
+the replica (`lavish-axi --version` prints `0.1.90-local`). The two-track
+layout on the evaluation box, and how to update either track, is in the vendor
+directory's `TRACKS.md`.
+
 ## Taking an upstream update
 
 ```sh
@@ -96,8 +111,13 @@ git fetch upstream
 git merge upstream/main
 bin/fm-test-run.sh --family pure-contract-unit    # includes fm-airgap and fm-egress-allowlist
 bin/fm-egress-audit.sh -- env FM_BOOTSTRAP_DETECT_ONLY=1 bin/fm-bootstrap.sh
+FM_BEARINGS_LAVISH_LIVE=1 bash tests/fm-bearings-board-lavish-live-e2e.test.sh   # with lavish-local on PATH
 ```
 
 Red on the allowlist test means upstream named a new host. Read the code that
 names it, decide its class, add the line, and if it is a new opt-in third
 party add a refusal to its call site and a case to `tests/fm-airgap.test.sh`.
+Red on the live board test, or a raised `LAVISH_AXI_MIN` / `LAVISH_AXI_BOARD_MIN`
+in `bin/fm-bootstrap.sh`, means upstream now expects something newer from
+Lavish; the replica's maintenance steps are in the vendor directory's
+`TRACKS.md` (section "lavish-axi publishes a new version").
