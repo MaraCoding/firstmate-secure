@@ -81,8 +81,8 @@ On a new machine, clone this repo and the vendor directory side by side, then
 install from the vendor directory:
 
 ```sh
-git clone git@github.com:MaraCoding/firstmate-secure.git ~/firstmate
-git clone git@github.com:MaraCoding/firstmate-vendor.git ~/firstmate-vendor
+git clone https://github.com/MaraCoding/firstmate-secure.git ~/firstmate
+git clone https://github.com/MaraCoding/firstmate-vendor.git ~/firstmate-vendor
 ~/firstmate/bin/fm-vendor-install.sh --vendor ~/firstmate-vendor --airgap
 ```
 
