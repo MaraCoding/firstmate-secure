@@ -77,6 +77,19 @@ policy allows a denylist; the switch does not depend on it.
 
 ## Toolchain
 
+On a new machine, clone this repo and the vendor directory side by side, then
+install from the vendor directory:
+
+```sh
+git clone git@github.com:MaraCoding/firstmate-secure.git ~/firstmate
+git clone git@github.com:MaraCoding/firstmate-vendor.git ~/firstmate-vendor
+~/firstmate/bin/fm-vendor-install.sh --vendor ~/firstmate-vendor --airgap
+```
+
+The `lavish-local` source lives in the private `MaraCoding/lavish-local`; the
+vendor directory already carries its packed tarball, so the install does not
+need it.
+
 `bin/fm-vendor-install.sh` installs the pinned toolchain from a local
 directory of tarballs instead of `curl | sh` and the public npm registry, so a
 work machine never runs an installer fetched at install time. The vendor
