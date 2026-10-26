@@ -102,7 +102,10 @@ later runs reuse the same prefix. It also puts the quota-axi shim
 probes every provider it finds a credential for, including GitHub Copilot by
 sending the `gh` token to api.github.com; the shim pins reads to Claude and
 Codex (the only providers firstmate routes between) and refuses `update` under
-the airgap switch. Under the airgap switch, `bin/fm-bootstrap.sh`
+the airgap switch. It also seeds `config/crew-dispatch.json` from
+`config-defaults/crew-dispatch.json` when the home has none (`config/` is
+gitignored, so a fresh clone otherwise has no routing rules and every crewmate
+gets the default harness); an existing file is never overwritten. Under the airgap switch, `bin/fm-bootstrap.sh`
 names this installer for any missing vendored tool, and
 `bin/fm-bootstrap.sh install` runs it instead of `curl | sh` or the public npm
 registry.

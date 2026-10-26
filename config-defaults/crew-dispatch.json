@@ -1,0 +1,164 @@
+{
+  "rules": [
+    {
+      "when": "The task is destructive, irreversible, or outward-facing: force pushes or history rewrites, deleting branches, files, or data, changing CI/CD, deploy, or release configuration, touching secrets, credentials, or account pins, editing anything outside the task's own repo or worktree, or any action with side effects beyond the branch such as publishing, posting, sending, or paying.",
+      "approval": "captain",
+      "min_confidence": 0.9,
+      "use": [
+        {
+          "harness": "pi",
+          "model": "openai-codex/gpt-6-astra",
+          "effort": "xhigh",
+          "provider": "codex"
+        },
+        {
+          "harness": "claude",
+          "model": "opus",
+          "effort": "xhigh",
+          "provider": "claude"
+        }
+      ],
+      "why": "REQUIRES THE CAPTAIN'S EXPLICIT APPROVAL BEFORE DISPATCH. Never route here from the brief alone; stop, state the blast radius, and wait. When approved, spend the strongest reasoning available because mistakes cannot be undone."
+    },
+    {
+      "when": "The task is a simple bug fix whose root cause and expected behavior are already well understood, with a reproducible failing case or a clear acceptance command, touching a small known set of files.",
+      "use": [
+        {
+          "harness": "pi",
+          "model": "openai-codex/gpt-6-luna",
+          "effort": "high",
+          "provider": "codex"
+        },
+        {
+          "harness": "claude",
+          "model": "sonnet",
+          "effort": "high",
+          "provider": "claude"
+        }
+      ],
+      "why": "Use more efficient models for well defined work; either subscription can finish it, so spend whichever has more window left."
+    },
+    {
+      "when": "The task is a trivial mechanical edit such as a rote rename, formatting or lint sweep, targeted typo fix, comment or docstring touch-up, dependency version bump with no API change, or simple file gathering, with little or no ambiguity.",
+      "use": [
+        {
+          "harness": "claude",
+          "model": "claude-haiku-5-5",
+          "effort": "low",
+          "provider": "claude"
+        },
+        {
+          "harness": "pi",
+          "model": "openai-codex/gpt-6-luna",
+          "effort": "low",
+          "provider": "codex"
+        }
+      ],
+      "why": "Cheapest fast profile for narrow, low-ambiguity work. Haiku 5.5 is first; Luna 6 on low is the fallback when the Claude window is tight."
+    },
+    {
+      "when": "The task is a scout: investigation, diagnosis, audit, root-cause hunting, or design work whose main output is understanding, a plan, or a written recommendation rather than a code change, and reasoning quality matters more than speed.",
+      "use": [
+        {
+          "harness": "claude",
+          "model": "opus",
+          "effort": "high",
+          "provider": "claude"
+        },
+        {
+          "harness": "pi",
+          "model": "openai-codex/gpt-6-astra",
+          "effort": "high",
+          "provider": "codex"
+        }
+      ],
+      "why": "Ambiguous investigation and design deserve the strongest reasoning class at high. Do not downgrade this class solely to conserve quota."
+    },
+    {
+      "when": "The task is a big or ambiguous multi-file feature, a risky refactor, a cross-cutting change to shared libraries or contracts, or work that requires holding many moving parts in mind at once.",
+      "use": [
+        {
+          "harness": "claude",
+          "model": "opus",
+          "effort": "high",
+          "provider": "claude"
+        },
+        {
+          "harness": "pi",
+          "model": "openai-codex/gpt-6-astra",
+          "effort": "high",
+          "provider": "codex"
+        }
+      ],
+      "why": "Strong coding profile for large, ambiguous shipping work; resolve the alternatives through quota-array-dispatch."
+    },
+    {
+      "when": "The task must read or reason over a very large amount of material in one pass: long logs or traces, many files across a monorepo, big generated diffs, or a full-repo survey where a smaller context window would force lossy chunking.",
+      "use": [
+        {
+          "harness": "pi",
+          "model": "openai-codex/gpt-6.1-sol",
+          "effort": "high",
+          "provider": "codex"
+        },
+        {
+          "harness": "claude",
+          "model": "opus",
+          "effort": "high",
+          "provider": "claude"
+        }
+      ],
+      "why": "gpt-6.1-sol carries a 500K context window versus 272K elsewhere; prefer it when the input itself is the hard part."
+    },
+    {
+      "when": "The task is an independent review, verification, or second opinion on a change another crewmate produced: checking a ready branch against its brief, hunting regressions, or judging whether tests actually prove the behavior.",
+      "use": [
+        {
+          "harness": "pi",
+          "model": "openai-codex/gpt-6-astra",
+          "effort": "high",
+          "provider": "codex"
+        },
+        {
+          "harness": "claude",
+          "model": "opus",
+          "effort": "high",
+          "provider": "claude"
+        }
+      ],
+      "why": "A reviewer should not share the author's blind spots; when the task record shows which harness wrote the change, prefer the other one."
+    },
+    {
+      "when": "The task is writing or extending tests, documentation, changelogs, or examples for behavior that already exists and is understood, with no design decisions left open.",
+      "use": [
+        {
+          "harness": "pi",
+          "model": "openai-codex/gpt-6-luna",
+          "effort": "medium",
+          "provider": "codex"
+        },
+        {
+          "harness": "claude",
+          "model": "sonnet",
+          "effort": "medium",
+          "provider": "claude"
+        }
+      ],
+      "why": "Well-bounded authoring work; mid-tier models at medium effort are accurate enough and cheaper than the shipping tier."
+    }
+  ],
+  "default": [
+    {
+      "harness": "claude",
+      "model": "opus",
+      "effort": "medium",
+      "provider": "claude"
+    },
+    {
+      "harness": "pi",
+      "model": "openai-codex/gpt-6-astra",
+      "effort": "medium",
+      "provider": "codex"
+    }
+  ]
+}

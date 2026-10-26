@@ -32,6 +32,7 @@
 #     NO_MISTAKES_TELEMETRY=off and NO_MISTAKES_NO_UPDATE_CHECK=1 (belt and
 #     braces: the rebuilt binary cannot phone home even without them)
 #   - with --airgap, config/airgap in this home (docs/airgap.md)
+#   - config/crew-dispatch.json from config-defaults/ when the home has none
 #   - a per-user npm prefix (~/.npm-global, in ~/.npmrc) when the global one is
 #     not writable
 #   - one env file with PATH and the variables above, sourced by one line in
@@ -213,6 +214,18 @@ if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/d
   fi
 else
   "$NM_ROOT/bin/no-mistakes" daemon restart >/dev/null 2>&1 || say "warning: no-mistakes daemon restart failed; run it after login"
+fi
+
+# ---- routing rules: config/ is gitignored, so a fresh clone has no
+# crew-dispatch.json and every crewmate would get the default harness. Seed the
+# secure track's rules (config-defaults/crew-dispatch.json); never overwrite a
+# home's own file.
+if [ -f "$CONFIG/crew-dispatch.json" ]; then
+  say "routing: keeping existing $CONFIG/crew-dispatch.json"
+else
+  mkdir -p "$CONFIG" || die "cannot create $CONFIG"
+  cp "$FM_ROOT/config-defaults/crew-dispatch.json" "$CONFIG/crew-dispatch.json" || die "cannot seed $CONFIG/crew-dispatch.json"
+  say "routing: seeded $CONFIG/crew-dispatch.json from config-defaults/"
 fi
 
 # ---- airgap switch
