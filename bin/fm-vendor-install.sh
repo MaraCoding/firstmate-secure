@@ -3,7 +3,7 @@
 # vendor directory, never from `curl | sh` or the public npm registry.
 #
 # Usage:
-#   fm-vendor-install.sh [--vendor <dir>] [--bin-dir <dir>] [--airgap] [--check]
+#   fm-vendor-install.sh [--vendor <dir>] [--prefix <dir>] [--bin-dir <dir>] [--airgap] [--check]
 #
 # The vendor directory (default $FM_VENDOR_DIR, then a firstmate-vendor clone
 # beside this checkout, then ~/firstmate-vendor) holds:
@@ -30,9 +30,19 @@
 #     braces: the rebuilt binary cannot phone home even without them)
 #   - with --airgap, config/airgap in this home (docs/airgap.md)
 #   - a per-user npm prefix (~/.npm-global, in ~/.npmrc) when the global one is
-#     not writable, and one PATH line for --bin-dir and the npm global bin in
+#     not writable
+#   - one env file with PATH and the variables above, sourced by one line in
 #     ~/.bashrc (and ~/.zshrc, ~/.profile when they exist); it then checks every
-#     tool resolves there, so firstmate never starts with them MISSING
+#     tool resolves, so firstmate never starts with them MISSING
+#
+# --prefix <dir> puts everything under <dir> instead of the home directory
+# (e.g. /mnt/workspace/fm-tools): tools in <dir>/bin, npm packages in <dir>/npm
+# (cache <dir>/npm-cache), no-mistakes and its data in <dir>/no-mistakes
+# (NM_HOME), lavish state in <dir>/lavish-axi (LAVISH_AXI_STATE_DIR), and the env
+# file at <dir>/env.sh, which also sets FM_VENDOR_PREFIX so later runs (including
+# bin/fm-bootstrap.sh install under airgap) reuse <dir>. Only the one source line goes in the shell rc files, and
+# the systemd drop-in in ~/.config, because that is where the shell and systemd
+# read them.
 # --check only verifies hashes and reports what would change; it installs nothing.
 #
 # It never fetches anything. If a file is missing it says which one and how it
@@ -50,7 +60,8 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 if [ -n "${FM_VENDOR_DIR:-}" ]; then VENDOR=$FM_VENDOR_DIR
 elif [ -d "$FM_ROOT/../firstmate-vendor" ]; then VENDOR=$(cd "$FM_ROOT/../firstmate-vendor" && pwd)
 else VENDOR="$HOME/firstmate-vendor"; fi
-BIN_DIR="$HOME/.local/bin"
+BIN_DIR=
+PREFIX="${FM_VENDOR_PREFIX:-}"  # set by the env file after a --prefix install, so re-runs keep it
 AIRGAP=0
 CHECK=0
 
@@ -62,12 +73,24 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --vendor) [ $# -ge 2 ] || die "--vendor needs a directory"; VENDOR=$2; shift 2 ;;
     --bin-dir) [ $# -ge 2 ] || die "--bin-dir needs a directory"; BIN_DIR=$2; shift 2 ;;
+    --prefix) [ $# -ge 2 ] || die "--prefix needs a directory"; PREFIX=$2; shift 2 ;;
     --airgap) AIRGAP=1; shift ;;
     --check) CHECK=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) die "unknown argument $1" ;;
   esac
 done
+if [ -n "$PREFIX" ]; then
+  mkdir -p "$PREFIX" || die "cannot create $PREFIX"
+  PREFIX=$(cd "$PREFIX" && pwd)
+  [ -n "$BIN_DIR" ] || BIN_DIR="$PREFIX/bin"
+  NM_ROOT="$PREFIX/no-mistakes"
+  ENV_FILE="$PREFIX/env.sh"
+else
+  [ -n "$BIN_DIR" ] || BIN_DIR="$HOME/.local/bin"
+  NM_ROOT="$HOME/.no-mistakes"
+  ENV_FILE="$HOME/.config/firstmate/vendor-env.sh"
+fi
 [ -d "$VENDOR" ] || die "vendor directory not found: $VENDOR (clone firstmate-vendor next to this checkout, or pass --vendor <dir>)"
 
 # verify <dir> <file>: the file's sha256 must match its line in <dir>/SHA256SUMS.
@@ -108,8 +131,13 @@ mkdir -p "$BIN_DIR" || die "cannot create $BIN_DIR"
 # A system node (prefix /usr or /usr/local) makes `npm install -g` fail with
 # EACCES for a normal user. Use a per-user prefix then, the way npm's own docs
 # recommend, so the install never needs sudo.
+if [ -n "$PREFIX" ]; then
+  # Per-invocation only: ~/.npmrc is left alone, the env file carries the prefix.
+  export npm_config_prefix="$PREFIX/npm" npm_config_cache="$PREFIX/npm-cache"
+  mkdir -p "$npm_config_prefix" "$npm_config_cache" || die "cannot create $PREFIX/npm"
+fi
 NPM_PREFIX=$(npm prefix -g 2>/dev/null) || die "cannot read the npm global prefix"
-if [ ! -w "$NPM_PREFIX" ] || { [ -d "$NPM_PREFIX/lib/node_modules" ] && [ ! -w "$NPM_PREFIX/lib/node_modules" ]; }; then
+if [ -z "$PREFIX" ] && [ ! -w "$NPM_PREFIX" ] || { [ -d "$NPM_PREFIX/lib/node_modules" ] && [ ! -w "$NPM_PREFIX/lib/node_modules" ]; }; then
   NPM_PREFIX="$HOME/.npm-global"
   mkdir -p "$NPM_PREFIX" || die "cannot create $NPM_PREFIX"
   npm config set prefix "$NPM_PREFIX" || die "cannot set the npm prefix to $NPM_PREFIX"
@@ -134,7 +162,7 @@ install -m 0755 "$tmp/treehouse" "$BIN_DIR/treehouse" || die "cannot install tre
 say "treehouse -> $BIN_DIR/treehouse ($("$BIN_DIR/treehouse" --version 2>/dev/null | head -n1))"
 
 # ---- no-mistakes (same layout as upstream's docs/install.sh)
-NM_ROOT="$HOME/.no-mistakes"
+export NM_HOME="$NM_ROOT"
 mkdir -p "$NM_ROOT/bin" || die "cannot create $NM_ROOT/bin"
 if [ -x "$NM_ROOT/bin/no-mistakes" ] && [ ! -e "$NM_ROOT/bin/no-mistakes.pre-vendor" ]; then
   cp -p "$NM_ROOT/bin/no-mistakes" "$NM_ROOT/bin/no-mistakes.pre-vendor"
@@ -146,23 +174,28 @@ say "no-mistakes -> $NM_ROOT/bin/no-mistakes ($("$NM_ROOT/bin/no-mistakes" --ver
 
 # environment: shell and systemd user session
 mkdir -p "$HOME/.config/environment.d"
-printf 'NO_MISTAKES_TELEMETRY=off\nNO_MISTAKES_NO_UPDATE_CHECK=1\n' > "$HOME/.config/environment.d/no-mistakes.conf"
-if ! grep -q 'NO_MISTAKES_TELEMETRY' "$HOME/.bashrc" 2>/dev/null; then
-  printf '\n# firstmate vendor install: keep no-mistakes from phoning home\nexport NO_MISTAKES_TELEMETRY=off\nexport NO_MISTAKES_NO_UPDATE_CHECK=1\n' >> "$HOME/.bashrc"
-fi
+{
+  printf 'NO_MISTAKES_TELEMETRY=off\nNO_MISTAKES_NO_UPDATE_CHECK=1\n'
+  [ -z "$PREFIX" ] || printf 'NM_HOME=%s\n' "$NM_ROOT"
+} > "$HOME/.config/environment.d/no-mistakes.conf"
+export NO_MISTAKES_TELEMETRY=off NO_MISTAKES_NO_UPDATE_CHECK=1
 if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
-  systemctl --user import-environment NO_MISTAKES_TELEMETRY NO_MISTAKES_NO_UPDATE_CHECK 2>/dev/null || true
+  systemctl --user import-environment NO_MISTAKES_TELEMETRY NO_MISTAKES_NO_UPDATE_CHECK NM_HOME 2>/dev/null || true
   # upstream's installer ends with `daemon restart`; do the same so the unit exists,
   # then give it a drop-in so the variables survive reboots.
   "$NM_ROOT/bin/no-mistakes" daemon restart >/dev/null 2>&1 || say "warning: no-mistakes daemon restart failed; run it after login"
-  unit=$(systemctl --user list-units --all --no-legend 'no-mistakes-daemon-*.service' 2>/dev/null | awk '{print $1; exit}')
-  if [ -n "$unit" ]; then
+  # One unit per NM_HOME; the drop-in only sets the two off switches, so it is
+  # safe on every unit, including one for another root.
+  units=$(systemctl --user list-units --all --no-legend 'no-mistakes-daemon-*.service' 2>/dev/null | awk '{print $1}')
+  for unit in $units; do
     mkdir -p "$HOME/.config/systemd/user/$unit.d"
     printf '[Service]\nEnvironment=NO_MISTAKES_TELEMETRY=off\nEnvironment=NO_MISTAKES_NO_UPDATE_CHECK=1\n' \
       > "$HOME/.config/systemd/user/$unit.d/no-phone-home.conf"
+  done
+  if [ -n "$units" ]; then
     systemctl --user daemon-reload 2>/dev/null || true
-    systemctl --user restart "$unit" 2>/dev/null || true
-    say "daemon $unit restarted with the no-phone-home drop-in"
+    for unit in $units; do systemctl --user restart "$unit" 2>/dev/null || true; done
+    say "daemon unit(s) restarted with the no-phone-home drop-in: $(printf '%s' "$units" | tr '\n' ' ')"
   fi
 else
   "$NM_ROOT/bin/no-mistakes" daemon restart >/dev/null 2>&1 || say "warning: no-mistakes daemon restart failed; run it after login"
@@ -175,17 +208,31 @@ if [ "$AIRGAP" -eq 1 ]; then
   say "airgap on: $CONFIG/airgap (docs/airgap.md)"
 fi
 
-# ---- PATH: every tool above lands in $BIN_DIR or $NPM_BIN; firstmate reports
-# them MISSING unless both are on PATH in the shell that starts it.
-path_mark='# firstmate vendor install: PATH'
-path_line="export PATH=\"$BIN_DIR:$NPM_BIN:\$PATH\"  $path_mark"
+# ---- env file: every tool above lands in $BIN_DIR or $NPM_BIN; firstmate
+# reports them MISSING unless both are on PATH in the shell that starts it.
+mkdir -p "$(dirname "$ENV_FILE")" || die "cannot create $(dirname "$ENV_FILE")"
+{
+  echo "# written by firstmate bin/fm-vendor-install.sh; re-run it to refresh"
+  printf 'export PATH="%s:%s:%s"\n' "$BIN_DIR" "$NPM_BIN" "\$PATH"  # $PATH stays literal: expanded when sourced
+  echo "export NO_MISTAKES_TELEMETRY=off NO_MISTAKES_NO_UPDATE_CHECK=1"
+  if [ -n "$PREFIX" ]; then
+    printf 'export FM_VENDOR_PREFIX="%s"\n' "$PREFIX"
+    printf 'export NM_HOME="%s"\n' "$NM_ROOT"
+    printf 'export LAVISH_AXI_STATE_DIR="%s"\n' "$PREFIX/lavish-axi"
+    printf 'export npm_config_prefix="%s" npm_config_cache="%s"\n' "$PREFIX/npm" "$PREFIX/npm-cache"
+  fi
+} > "$ENV_FILE" || die "cannot write $ENV_FILE"
+src_mark='# firstmate vendor install: env'
+src_line="[ -f \"$ENV_FILE\" ] && . \"$ENV_FILE\"  $src_mark"
 for rc in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
   case "$rc" in */.bashrc) ;; *) [ -e "$rc" ] || continue ;; esac
-  if ! grep -qF "$path_mark" "$rc" 2>/dev/null; then
-    printf '\n%s\n' "$path_line" >> "$rc" || die "cannot update $rc"
-    say "PATH: added $BIN_DIR and $NPM_BIN in $rc"
-  fi
+  # Replace any earlier line (this one, or the older inline PATH line) with the current one.
+  grep -vF -e "$src_mark" -e '# firstmate vendor install: PATH' "$rc" > "$rc.fm-tmp" 2>/dev/null || true
+  printf '%s\n' "$src_line" >> "$rc.fm-tmp" || die "cannot write $rc.fm-tmp"
+  cat "$rc.fm-tmp" > "$rc" || die "cannot update $rc"
+  rm -f "$rc.fm-tmp"
 done
+say "env: $ENV_FILE (sourced from ~/.bashrc)"
 missing=()
 for t in treehouse no-mistakes gh-axi chrome-devtools-axi tasks-axi quota-axi lavish-axi; do
   PATH="$BIN_DIR:$NPM_BIN:$PATH" command -v "$t" >/dev/null 2>&1 || missing+=("$t")
@@ -194,5 +241,5 @@ done
 
 case ":$PATH:" in
   *":$BIN_DIR:"*":$NPM_BIN:"*|*":$NPM_BIN:"*":$BIN_DIR:"*) say "done. Run bin/fm-bootstrap.sh in this home." ;;
-  *) say "done. Open a new terminal (or run: $path_line) before starting firstmate, so it finds these tools." ;;
+  *) say "done. Open a new terminal (or run: . $ENV_FILE) before starting firstmate, so it finds these tools." ;;
 esac

@@ -78,23 +78,29 @@ policy allows a denylist; the switch does not depend on it.
 ## Toolchain
 
 On a new machine, clone this repo and the vendor directory side by side in any
-folder (a home directory or a workspace such as `/mnt/workspace`), install from
-the vendor directory, then open a new terminal so the tools are on `PATH`:
+folder, install from the vendor directory, then open a new terminal so the
+tools are on `PATH`. To keep the tools out of the home directory too, pass
+`--prefix`:
 
 ```sh
 cd /mnt/workspace   # or any folder
 git clone https://github.com/MaraCoding/firstmate-secure.git firstmate
 git clone https://github.com/MaraCoding/firstmate-vendor.git firstmate-vendor
-firstmate/bin/fm-vendor-install.sh --airgap
+firstmate/bin/fm-vendor-install.sh --airgap --prefix /mnt/workspace/fm-tools   # omit --prefix to install under ~
 ```
 
 The installer finds `firstmate-vendor` beside the checkout (or `--vendor <dir>`,
-or `$FM_VENDOR_DIR`). It puts the tools in `~/.local/bin` and the npm global
-bin, switching npm to a per-user prefix when the global one is not writable,
-and adds both to `PATH` in `~/.bashrc` (and `~/.zshrc`, `~/.profile` when they
-exist). Under the airgap switch, `bin/fm-bootstrap.sh` names this installer for
-any missing vendored tool, and `bin/fm-bootstrap.sh install` runs it instead of
-`curl | sh` or the public npm registry.
+or `$FM_VENDOR_DIR`). With `--prefix <dir>` every tool, the npm packages and
+cache, no-mistakes and its data (`NM_HOME`) and lavish state
+(`LAVISH_AXI_STATE_DIR`) live under `<dir>`; without it they go to
+`~/.local/bin`, the npm global bin (a per-user prefix when the global one is
+not writable) and `~/.no-mistakes`. Either way it writes one env file
+(`<dir>/env.sh`, or `~/.config/firstmate/vendor-env.sh`) and adds one line to
+`~/.bashrc` (and `~/.zshrc`, `~/.profile` when they exist) that sources it;
+later runs reuse the same prefix. Under the airgap switch, `bin/fm-bootstrap.sh`
+names this installer for any missing vendored tool, and
+`bin/fm-bootstrap.sh install` runs it instead of `curl | sh` or the public npm
+registry.
 
 The `lavish-local` source lives in the private `MaraCoding/lavish-local`; the
 vendor directory already carries its packed tarball, so the install does not
