@@ -77,14 +77,24 @@ policy allows a denylist; the switch does not depend on it.
 
 ## Toolchain
 
-On a new machine, clone this repo and the vendor directory side by side, then
-install from the vendor directory:
+On a new machine, clone this repo and the vendor directory side by side in any
+folder (a home directory or a workspace such as `/mnt/workspace`), install from
+the vendor directory, then open a new terminal so the tools are on `PATH`:
 
 ```sh
-git clone https://github.com/MaraCoding/firstmate-secure.git ~/firstmate
-git clone https://github.com/MaraCoding/firstmate-vendor.git ~/firstmate-vendor
-~/firstmate/bin/fm-vendor-install.sh --vendor ~/firstmate-vendor --airgap
+cd /mnt/workspace   # or any folder
+git clone https://github.com/MaraCoding/firstmate-secure.git firstmate
+git clone https://github.com/MaraCoding/firstmate-vendor.git firstmate-vendor
+firstmate/bin/fm-vendor-install.sh --airgap
 ```
+
+The installer finds `firstmate-vendor` beside the checkout (or `--vendor <dir>`,
+or `$FM_VENDOR_DIR`). It puts the tools in `~/.local/bin` and the npm global
+bin, switching npm to a per-user prefix when the global one is not writable,
+and adds both to `PATH` in `~/.bashrc` (and `~/.zshrc`, `~/.profile` when they
+exist). Under the airgap switch, `bin/fm-bootstrap.sh` names this installer for
+any missing vendored tool, and `bin/fm-bootstrap.sh install` runs it instead of
+`curl | sh` or the public npm registry.
 
 The `lavish-local` source lives in the private `MaraCoding/lavish-local`; the
 vendor directory already carries its packed tarball, so the install does not

@@ -5,7 +5,8 @@
 # Usage:
 #   fm-vendor-install.sh [--vendor <dir>] [--bin-dir <dir>] [--airgap] [--check]
 #
-# The vendor directory (default $FM_VENDOR_DIR, then ~/firstmate-vendor) holds:
+# The vendor directory (default $FM_VENDOR_DIR, then a firstmate-vendor clone
+# beside this checkout, then ~/firstmate-vendor) holds:
 #   npm/*.tgz + npm/SHA256SUMS       tasks-axi quota-axi gh-axi chrome-devtools-axi
 #                                    axi-sdk-js (npm pack output) and lavish-local,
 #                                    the offline replica that provides the
@@ -28,6 +29,10 @@
 #     NO_MISTAKES_TELEMETRY=off and NO_MISTAKES_NO_UPDATE_CHECK=1 (belt and
 #     braces: the rebuilt binary cannot phone home even without them)
 #   - with --airgap, config/airgap in this home (docs/airgap.md)
+#   - a per-user npm prefix (~/.npm-global, in ~/.npmrc) when the global one is
+#     not writable, and one PATH line for --bin-dir and the npm global bin in
+#     ~/.bashrc (and ~/.zshrc, ~/.profile when they exist); it then checks every
+#     tool resolves there, so firstmate never starts with them MISSING
 # --check only verifies hashes and reports what would change; it installs nothing.
 #
 # It never fetches anything. If a file is missing it says which one and how it
@@ -40,7 +45,11 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-$FM_ROOT}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
-VENDOR="${FM_VENDOR_DIR:-$HOME/firstmate-vendor}"
+# Default vendor directory: $FM_VENDOR_DIR, else a firstmate-vendor clone next
+# to this checkout (any location, e.g. /mnt/workspace), else ~/firstmate-vendor.
+if [ -n "${FM_VENDOR_DIR:-}" ]; then VENDOR=$FM_VENDOR_DIR
+elif [ -d "$FM_ROOT/../firstmate-vendor" ]; then VENDOR=$(cd "$FM_ROOT/../firstmate-vendor" && pwd)
+else VENDOR="$HOME/firstmate-vendor"; fi
 BIN_DIR="$HOME/.local/bin"
 AIRGAP=0
 CHECK=0
@@ -59,7 +68,7 @@ while [ $# -gt 0 ]; do
     *) die "unknown argument $1" ;;
   esac
 done
-[ -d "$VENDOR" ] || die "vendor directory not found: $VENDOR"
+[ -d "$VENDOR" ] || die "vendor directory not found: $VENDOR (clone firstmate-vendor next to this checkout, or pass --vendor <dir>)"
 
 # verify <dir> <file>: the file's sha256 must match its line in <dir>/SHA256SUMS.
 verify() {
@@ -95,6 +104,18 @@ fi
 command -v npm >/dev/null 2>&1 || die "npm not found; install node first (system package)"
 command -v tar >/dev/null 2>&1 || die "tar not found"
 mkdir -p "$BIN_DIR" || die "cannot create $BIN_DIR"
+
+# A system node (prefix /usr or /usr/local) makes `npm install -g` fail with
+# EACCES for a normal user. Use a per-user prefix then, the way npm's own docs
+# recommend, so the install never needs sudo.
+NPM_PREFIX=$(npm prefix -g 2>/dev/null) || die "cannot read the npm global prefix"
+if [ ! -w "$NPM_PREFIX" ] || { [ -d "$NPM_PREFIX/lib/node_modules" ] && [ ! -w "$NPM_PREFIX/lib/node_modules" ]; }; then
+  NPM_PREFIX="$HOME/.npm-global"
+  mkdir -p "$NPM_PREFIX" || die "cannot create $NPM_PREFIX"
+  npm config set prefix "$NPM_PREFIX" || die "cannot set the npm prefix to $NPM_PREFIX"
+  say "npm global prefix was not writable; using $NPM_PREFIX (saved in ~/.npmrc)"
+fi
+NPM_BIN="$NPM_PREFIX/bin"
 
 # ---- npm packages from local tarballs (the SDK first so the others resolve it)
 ordered=()
@@ -154,4 +175,24 @@ if [ "$AIRGAP" -eq 1 ]; then
   say "airgap on: $CONFIG/airgap (docs/airgap.md)"
 fi
 
-say "done. Put $BIN_DIR and your npm global bin on PATH, then run bin/fm-bootstrap.sh in this home."
+# ---- PATH: every tool above lands in $BIN_DIR or $NPM_BIN; firstmate reports
+# them MISSING unless both are on PATH in the shell that starts it.
+path_mark='# firstmate vendor install: PATH'
+path_line="export PATH=\"$BIN_DIR:$NPM_BIN:\$PATH\"  $path_mark"
+for rc in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
+  case "$rc" in */.bashrc) ;; *) [ -e "$rc" ] || continue ;; esac
+  if ! grep -qF "$path_mark" "$rc" 2>/dev/null; then
+    printf '\n%s\n' "$path_line" >> "$rc" || die "cannot update $rc"
+    say "PATH: added $BIN_DIR and $NPM_BIN in $rc"
+  fi
+done
+missing=()
+for t in treehouse no-mistakes gh-axi chrome-devtools-axi tasks-axi quota-axi lavish-axi; do
+  PATH="$BIN_DIR:$NPM_BIN:$PATH" command -v "$t" >/dev/null 2>&1 || missing+=("$t")
+done
+[ ${#missing[@]} -eq 0 ] || die "installed, but not found on $BIN_DIR or $NPM_BIN: ${missing[*]}"
+
+case ":$PATH:" in
+  *":$BIN_DIR:"*":$NPM_BIN:"*|*":$NPM_BIN:"*":$BIN_DIR:"*) say "done. Run bin/fm-bootstrap.sh in this home." ;;
+  *) say "done. Open a new terminal (or run: $path_line) before starting firstmate, so it finds these tools." ;;
+esac

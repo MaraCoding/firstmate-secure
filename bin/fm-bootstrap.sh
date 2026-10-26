@@ -849,7 +849,19 @@ secondmate_handoff_detect() {
   done
 }
 
+# Tools the vendor directory ships (bin/fm-vendor-install.sh). Under the airgap
+# switch they are installed only from there, never by curl | sh or the public
+# npm registry, which would bring back the stock telemetry builds.
+vendored_tool() {
+  case "$1" in treehouse|no-mistakes|gh-axi|chrome-devtools-axi|lavish-axi|tasks-axi|quota-axi) return 0 ;; esac
+  return 1
+}
+
 install_cmd() {
+  if vendored_tool "$1" && fm_airgap_active "$FM_HOME"; then
+    echo "$SCRIPT_DIR/fm-vendor-install.sh  # airgap: from the vendor directory (\$FM_VENDOR_DIR, else firstmate-vendor beside this checkout); then put ~/.local/bin and the npm global bin on PATH"
+    return 0
+  fi
   case "$1" in
     tmux|node|git|gh|curl|jq|orca|zellij) echo "brew install $1  # or the platform's package manager" ;;
     cmux) echo "brew install --cask cmux  # or see https://cmux.com" ;;
@@ -1388,6 +1400,18 @@ fi
 if [ "${1:-}" = "install" ]; then
   shift
   [ $# -gt 0 ] || { echo "usage: fm-bootstrap.sh install <tool>..." >&2; exit 1; }
+  if fm_airgap_active "$FM_HOME"; then
+    vendored=()
+    rest=()
+    for t in "$@"; do if vendored_tool "$t"; then vendored+=("$t"); else rest+=("$t"); fi; done
+    if [ ${#vendored[@]} -gt 0 ]; then
+      # One vendor install covers every vendored tool; it verifies hashes and never fetches.
+      echo "installing ${vendored[*]} from the vendor directory (airgap: $(fm_airgap_reason))"
+      "$SCRIPT_DIR/fm-vendor-install.sh" || exit 1
+    fi
+    [ ${#rest[@]} -gt 0 ] || exit 0
+    set -- "${rest[@]}"
+  fi
   for t in "$@"; do
     if ! cmd=$(install_cmd "$t"); then
       instructions=$(manual_install_url "$t") || { echo "error: unknown tool $t" >&2; exit 1; }

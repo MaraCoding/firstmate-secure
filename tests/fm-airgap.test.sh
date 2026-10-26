@@ -158,6 +158,26 @@ test_bootstrap_reports_airgap() {
   pass "bootstrap reports the airgap switch as a detection line"
 }
 
+test_bootstrap_install_uses_vendor_only() {
+  local out rc empty="$TMP/empty-vendor" bare="$TMP/bare-path"
+  mkdir -p "$empty/npm" "$empty/bin" "$bare"
+  # A PATH where treehouse is surely absent, so detect-only prints its MISSING hint.
+  for t in bash sh env git node jq tmux awk sed grep cat date mkdir rm mv cp ls tr head tail sort uname dirname basename find wc cut ps id mktemp printf python3 sha256sum readlink stat touch sleep; do
+    p=$(command -v "$t" 2>/dev/null) && ln -sf "$p" "$bare/$t"
+  done
+  airgap_on
+  out=$(cd "$ROOT" && PATH="$FAKEBIN:$bare" FM_HOME="$HOME_DIR" FM_BOOTSTRAP_NETWORK=skip FM_BOOTSTRAP_DETECT_ONLY=1 bin/fm-bootstrap.sh 2>&1) || true
+  assert_contains "$out" "MISSING: treehouse (install: $ROOT/bin/fm-vendor-install.sh" "airgap MISSING hint names the vendor installer"
+  assert_not_contains "$out" "install.sh | sh" "airgap MISSING hint never suggests curl | sh"
+  out=$(cd "$ROOT" && FM_VENDOR_DIR="$empty" FM_HOME="$HOME_DIR" bin/fm-bootstrap.sh install treehouse tasks-axi 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "airgap install with an empty vendor directory must fail, not fall back to the network"
+  assert_contains "$out" "from the vendor directory" "airgap install routes vendored tools to fm-vendor-install.sh"
+  assert_contains "$out" "no npm tarballs under $empty/npm" "the vendor installer names what is missing"
+  airgap_off
+  no_network "fm-bootstrap install"
+  pass "airgap: bootstrap installs vendored tools only from the vendor directory"
+}
+
 # --- every guarded file still carries its guard ---------------------------------
 
 test_guards_present() {
@@ -176,4 +196,5 @@ test_dispatch_resolve_off_before_any_key
 test_inbox_model_calls_refuse_but_note_works
 test_voice_relay_refuses
 test_bootstrap_reports_airgap
+test_bootstrap_install_uses_vendor_only
 test_guards_present
