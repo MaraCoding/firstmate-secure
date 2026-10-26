@@ -178,6 +178,26 @@ test_bootstrap_install_uses_vendor_only() {
   pass "airgap: bootstrap installs vendored tools only from the vendor directory"
 }
 
+test_quota_axi_shim() {
+  local shim="$TMP/shim/quota-axi" real="$TMP/shim/real-quota-axi" out rc
+  mkdir -p "$TMP/shim"
+  printf '#!/usr/bin/env bash\nprintf "real %%s\\n" "$*"\n' > "$real"; chmod +x "$real"
+  # Render the template exactly as bin/fm-vendor-install.sh does.
+  sed -e "s#@QUOTA_AXI_REAL@#$real#" -e "s#@FM_AIRGAP_FILE@#$HOME_DIR/config/airgap#" \
+    "$ROOT/bin/fm-quota-axi-shim.sh" > "$shim"; chmod +x "$shim"
+  assert_equals "real --provider claude,codex --json" "$(FM_AIRGAP='' "$shim" --json)" "shim pins a plain read to claude,codex"
+  assert_equals "real quota --provider claude,codex --json" "$(FM_AIRGAP='' "$shim" quota --json)" "shim pins the quota subcommand too"
+  assert_equals "real --provider claude --json" "$(FM_AIRGAP='' "$shim" --provider claude --json)" "an explicit --provider passes through"
+  airgap_on
+  out=$(FM_AIRGAP='' "$shim" update 2>&1); rc=$?
+  assert_equals 75 "$rc" "shim refuses update under airgap"
+  assert_contains "$out" "'update' refused" "shim says why update is refused"
+  airgap_off
+  assert_equals "real update" "$(FM_AIRGAP='' "$shim" update)" "update passes through with airgap off"
+  assert_grep 'fm-quota-axi-shim.sh' "$ROOT/bin/fm-vendor-install.sh" "fm-vendor-install.sh installs the quota-axi shim"
+  pass "quota-axi shim pins providers and refuses update under airgap"
+}
+
 # --- every guarded file still carries its guard ---------------------------------
 
 test_guards_present() {
@@ -197,4 +217,5 @@ test_inbox_model_calls_refuse_but_note_works
 test_voice_relay_refuses
 test_bootstrap_reports_airgap
 test_bootstrap_install_uses_vendor_only
+test_quota_axi_shim
 test_guards_present

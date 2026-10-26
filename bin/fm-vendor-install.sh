@@ -22,6 +22,9 @@
 #
 # What it installs, idempotently:
 #   - the npm packages globally from the .tgz files (npm install -g <file>)
+#   - the quota-axi shim (bin/fm-quota-axi-shim.sh) into --bin-dir, in front of
+#     the npm quota-axi: reads pinned to claude,codex (no Copilot probe with the
+#     gh token), `update` refused under airgap
 #   - treehouse into --bin-dir (default ~/.local/bin)
 #   - no-mistakes into ~/.no-mistakes/bin with the ~/.local/bin symlink the
 #     upstream installer creates, then restarts its daemon the way upstream does
@@ -152,6 +155,17 @@ for f in "${ordered[@]}"; do
   say "npm install -g $(basename "$f")"
   npm install -g --no-fund --no-audit "$f" >/dev/null || die "npm install failed for $f"
 done
+
+# ---- quota-axi shim: stock quota-axi probes every provider it finds a
+# credential for, including GitHub Copilot with the gh token. The shim pins
+# reads to claude,codex and refuses `update` under airgap (bin/fm-quota-axi-shim.sh).
+[ "$BIN_DIR" != "$NPM_BIN" ] || die "--bin-dir must differ from the npm global bin ($NPM_BIN) so the quota-axi shim can sit in front of it"
+[ -x "$NPM_BIN/quota-axi" ] || die "quota-axi not found at $NPM_BIN/quota-axi after npm install"
+sed -e "s#@QUOTA_AXI_REAL@#$NPM_BIN/quota-axi#" -e "s#@FM_AIRGAP_FILE@#$CONFIG/airgap#" \
+  "$SCRIPT_DIR/fm-quota-axi-shim.sh" > "$BIN_DIR/quota-axi.new" || die "cannot write the quota-axi shim"
+chmod 0755 "$BIN_DIR/quota-axi.new" || die "cannot chmod the quota-axi shim"
+mv -f "$BIN_DIR/quota-axi.new" "$BIN_DIR/quota-axi" || die "cannot install the quota-axi shim"
+say "quota-axi shim -> $BIN_DIR/quota-axi (reads pinned to claude,codex; real binary $NPM_BIN/quota-axi)"
 
 # ---- treehouse
 tmp=$(mktemp -d) || die "mktemp failed"

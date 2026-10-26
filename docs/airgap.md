@@ -97,7 +97,12 @@ cache, no-mistakes and its data (`NM_HOME`) and lavish state
 not writable) and `~/.no-mistakes`. Either way it writes one env file
 (`<dir>/env.sh`, or `~/.config/firstmate/vendor-env.sh`) and adds one line to
 `~/.bashrc` (and `~/.zshrc`, `~/.profile` when they exist) that sources it;
-later runs reuse the same prefix. Under the airgap switch, `bin/fm-bootstrap.sh`
+later runs reuse the same prefix. It also puts the quota-axi shim
+(`bin/fm-quota-axi-shim.sh`) in front of the real quota-axi: stock quota-axi
+probes every provider it finds a credential for, including GitHub Copilot by
+sending the `gh` token to api.github.com; the shim pins reads to Claude and
+Codex (the only providers firstmate routes between) and refuses `update` under
+the airgap switch. Under the airgap switch, `bin/fm-bootstrap.sh`
 names this installer for any missing vendored tool, and
 `bin/fm-bootstrap.sh install` runs it instead of `curl | sh` or the public npm
 registry.
