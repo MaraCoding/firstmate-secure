@@ -79,8 +79,8 @@ After remote creation succeeds, clone it locally, add the registry entry, and in
 
 For a purely `local-only` project, create a local Git repository under its unused `projects/<name>` path, add the registry entry, and make no GitHub call.
 A new repository has no commit, and spawn refuses to dispatch work into a project with an unborn `HEAD`.
-Tell the captain that the project needs a first commit.
-The captain's request to create that local project authorizes this local initialization, but it does not authorize an unmentioned remote repository.
+The captain's request to create that local project, including a request to build something new that needs one, authorizes this local initialization, but it does not authorize an unmentioned remote repository.
+As part of that initialization, make exactly one empty first commit (`git -C projects/<name> commit --allow-empty -m "Initial commit"`) and then dispatch the build; add no files to it.
 
 ## Initialize
 
