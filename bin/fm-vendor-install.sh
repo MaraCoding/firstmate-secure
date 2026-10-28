@@ -32,7 +32,9 @@
 #     NO_MISTAKES_TELEMETRY=off and NO_MISTAKES_NO_UPDATE_CHECK=1 (belt and
 #     braces: the rebuilt binary cannot phone home even without them)
 #   - with --airgap, config/airgap in this home (docs/airgap.md)
-#   - config/crew-dispatch.json from config-defaults/ when the home has none
+#   - config/crew-dispatch.json and config/dispatch-classifier from
+#     config-defaults/ when the home has none (the local typed-dispatch
+#     classifier, since typesafe.ai is off under airgap)
 #   - a per-user npm prefix (~/.npm-global, in ~/.npmrc) when the global one is
 #     not writable
 #   - one env file with PATH and the variables above, sourced by one line in
@@ -226,6 +228,12 @@ else
   mkdir -p "$CONFIG" || die "cannot create $CONFIG"
   cp "$FM_ROOT/config-defaults/crew-dispatch.json" "$CONFIG/crew-dispatch.json" || die "cannot seed $CONFIG/crew-dispatch.json"
   say "routing: seeded $CONFIG/crew-dispatch.json from config-defaults/"
+fi
+if [ -f "$CONFIG/dispatch-classifier" ]; then
+  say "routing: keeping existing $CONFIG/dispatch-classifier"
+else
+  cp "$FM_ROOT/config-defaults/dispatch-classifier" "$CONFIG/dispatch-classifier" || die "cannot seed $CONFIG/dispatch-classifier"
+  say "routing: seeded $CONFIG/dispatch-classifier ($(grep -v '^#' "$CONFIG/dispatch-classifier"))"
 fi
 
 # ---- airgap switch

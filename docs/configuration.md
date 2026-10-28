@@ -1461,6 +1461,7 @@ Secondmate homes inherit this file from the primary, so a secondmate's own crewm
 
 `bin/fm-dispatch-resolve.sh` resolves one concrete crewmate or scout profile from a written brief with typesafe.ai's System One model (Jev), so the rule match that firstmate otherwise reasons out in its own context becomes one short tool turn.
 It is off unless `TYPESAFE_API_KEY` is non-empty in the calling environment or the home's gitignored `.env` holds a `TYPESAFE_API_KEY=` line; the environment wins, matching the Relay and mail-plane contracts, and the Relay accessor in `bin/fm-env-lib.sh` reads the line.
+A home without typesafe.ai can instead answer the same question with a model it already uses; see [Local classifier](#local-classifier-configdispatch-classifier) below, which needs no key and stays on under airgap.
 
 Off means one `dispatch-resolve: off` line on stderr, nothing on stdout, exit 0, and no network call, so firstmate dispatches exactly as it does without the tool.
 This section is the single owner of the tool's operator contract; the script header owns its exact flags and output lines, and "Crew dispatch profiles" above owns the declared rule and profile fields it applies.
@@ -1569,6 +1570,30 @@ Firstmate passes its profile line unless it states a reason to override, such as
 - The resolver fixes the endpoint at `https://api.typesafe.ai`, model at `jev-latest`, default confidence floor at 0.6, and request timeout at 5 seconds; `TYPESAFE_API_KEY` is its only resolver-specific environment setting.
 
 The live rule-match evidence is recorded in [`verification/dispatch-resolve.md`](verification/dispatch-resolve.md).
+
+### Local classifier (config/dispatch-classifier)
+
+The optional local, gitignored `config/dispatch-classifier` selects which model answers the rule question.
+It holds one setting line; blank lines and `#` comments are ignored, and `FM_DISPATCH_CLASSIFIER` in the environment wins over the file.
+
+```text
+typesafe                                  # the default: typesafe.ai Jev, as above
+claude <model> [samples]                  # e.g. claude claude-haiku-4-5
+pi <provider>/<model> [samples]           # e.g. pi openai-codex/gpt-5.6-luna
+```
+
+With `claude` or `pi`, the resolver needs no `TYPESAFE_API_KEY` and ignores one if present.
+It asks the same question with the same options, through that CLI, `samples` times in parallel (1 through 9, default 3).
+Everything after the answer is unchanged: confidence floors, fallback, approval, quota ranking, and every outcome above.
+
+- **Answer:** each sample states a probability for every option. Each sample is normalized to sum to 1, the samples are averaged, the choice is the most probable option, and the confidence is that option's averaged probability. Disagreement between samples therefore lowers confidence and can produce `ambiguous`.
+- **Failures:** if fewer than a majority of samples return a usable answer, the result is `error`. A missing sample under that threshold is disclosed on the `model:` line, for example `x2 of 3`.
+- **Account:** the call runs under the home's worker account pin (`config/claude-account` or `config/pi-account`, see "Worker account pin"), so it spends on the same login as the crew. A Pi model must name its provider, and a pinned Pi home must declare that provider.
+- **Isolation:** the classifier runs with no tools, no MCP servers, no settings, hooks, skills, extensions, or context files, and no saved session. Claude runs with extended thinking and nonessential traffic off.
+- **What leaves the machine:** exactly the text typesafe.ai would receive (the project name, the brief's task sections, each rule's `when`, and the question), checked against the never-send list first. It goes to the crew's own model vendor, which already receives the full brief when a worker starts. For that reason airgap does not turn the local classifier off.
+- **Errors:** a missing CLI or a timeout (`FM_DISPATCH_CLASSIFIER_TIMEOUT`, default 60 seconds per sample) is an `error` outcome with exit 0. A malformed setting line is a configuration error with exit 2.
+
+Classifier accuracy against typesafe.ai on the models available at work is recorded in [`verification/dispatch-resolve.md`](verification/dispatch-resolve.md).
 
 ## Toolchain
 

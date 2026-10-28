@@ -1,0 +1,2 @@
+# Typed dispatch classifier (docs/configuration.md "Local classifier").
+pi openai-codex/gpt-5.6-sol 3

@@ -1127,6 +1127,13 @@ crew_dispatch_validate() {
   typed_key=$TYPESAFE_API_KEY_PRIVATE
   [ -n "$typed_key" ] || typed_key=$(fmx_env_get TYPESAFE_API_KEY "$FM_HOME/.env")
   [ -z "$typed_key" ] || typed_active=true
+  # A local classifier (config/dispatch-classifier) turns the resolver on
+  # without a key, so the rules get the same strict harness check.
+  if [ -n "${FM_DISPATCH_CLASSIFIER:-}" ]; then
+    case "$FM_DISPATCH_CLASSIFIER" in claude\ *|pi\ *) typed_active=true ;; esac
+  elif [ -f "$CONFIG/dispatch-classifier" ] && grep -qE '^[[:space:]]*(claude|pi)[[:space:]]' "$CONFIG/dispatch-classifier" 2>/dev/null; then
+    typed_active=true
+  fi
   if $typed_active; then
     verified_harnesses=$(fm_control_harnesses | jq -Rsc 'split("\n") | map(select(length > 0))')
   else

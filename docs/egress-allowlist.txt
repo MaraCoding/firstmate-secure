@@ -24,8 +24,8 @@ githubstatus.com      doc          matched inside a gh error message, never fetc
 
 # --- provider (runtime audit only; not named in firstmate's own code) ----------
 openai.com            provider     openai-codex login and completions (Pi primary and workers)
-chatgpt.com           provider     openai-codex OAuth and backend endpoints
-anthropic.com         provider     Claude harness, quota-axi usage endpoint
+chatgpt.com           provider     openai-codex OAuth and backend endpoints; local dispatch classifier (pi)
+anthropic.com         provider     Claude harness, quota-axi usage endpoint; local dispatch classifier (claude)
 claude.ai             provider     Claude harness login
 
 # --- guarded: refuse under airgap -------------------------------------------

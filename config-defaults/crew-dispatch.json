@@ -7,13 +7,13 @@
       "use": [
         {
           "harness": "pi",
-          "model": "openai-codex/gpt-6-astra",
+          "model": "openai-codex/gpt-5.6-sol",
           "effort": "xhigh",
           "provider": "codex"
         },
         {
           "harness": "claude",
-          "model": "opus",
+          "model": "claude-opus-5-5",
           "effort": "xhigh",
           "provider": "claude"
         }
@@ -25,13 +25,13 @@
       "use": [
         {
           "harness": "pi",
-          "model": "openai-codex/gpt-6-luna",
+          "model": "openai-codex/gpt-5.6-luna",
           "effort": "high",
           "provider": "codex"
         },
         {
           "harness": "claude",
-          "model": "sonnet",
+          "model": "claude-sonnet-5",
           "effort": "high",
           "provider": "claude"
         }
@@ -43,31 +43,31 @@
       "use": [
         {
           "harness": "claude",
-          "model": "claude-haiku-5-5",
+          "model": "claude-haiku-4-5",
           "effort": "low",
           "provider": "claude"
         },
         {
           "harness": "pi",
-          "model": "openai-codex/gpt-6-luna",
+          "model": "openai-codex/gpt-5.6-luna",
           "effort": "low",
           "provider": "codex"
         }
       ],
-      "why": "Cheapest fast profile for narrow, low-ambiguity work. Haiku 5.5 is first; Luna 6 on low is the fallback when the Claude window is tight."
+      "why": "Cheapest fast profile for narrow, low-ambiguity work. Haiku 4.5 is first; Luna 5.6 on low is the fallback when the Claude window is tight."
     },
     {
       "when": "The task is a scout: investigation, diagnosis, audit, root-cause hunting, or design work whose main output is understanding, a plan, or a written recommendation rather than a code change, and reasoning quality matters more than speed.",
       "use": [
         {
           "harness": "claude",
-          "model": "opus",
+          "model": "claude-opus-5-5",
           "effort": "high",
           "provider": "claude"
         },
         {
           "harness": "pi",
-          "model": "openai-codex/gpt-6-astra",
+          "model": "openai-codex/gpt-5.6-sol",
           "effort": "high",
           "provider": "codex"
         }
@@ -79,13 +79,13 @@
       "use": [
         {
           "harness": "claude",
-          "model": "opus",
+          "model": "claude-opus-5-5",
           "effort": "high",
           "provider": "claude"
         },
         {
           "harness": "pi",
-          "model": "openai-codex/gpt-6-astra",
+          "model": "openai-codex/gpt-5.6-sol",
           "effort": "high",
           "provider": "codex"
         }
@@ -96,32 +96,32 @@
       "when": "The task must read or reason over a very large amount of material in one pass: long logs or traces, many files across a monorepo, big generated diffs, or a full-repo survey where a smaller context window would force lossy chunking.",
       "use": [
         {
-          "harness": "pi",
-          "model": "openai-codex/gpt-6.1-sol",
-          "effort": "high",
-          "provider": "codex"
-        },
-        {
           "harness": "claude",
-          "model": "opus",
+          "model": "claude-opus-5-5",
           "effort": "high",
           "provider": "claude"
+        },
+        {
+          "harness": "pi",
+          "model": "openai-codex/gpt-5.6-sol",
+          "effort": "high",
+          "provider": "codex"
         }
       ],
-      "why": "gpt-6.1-sol carries a 500K context window versus 272K elsewhere; prefer it when the input itself is the hard part."
+      "why": "At work no available model has a larger context window than the others, so prefer the strongest reader and let quota pick between the two subscriptions."
     },
     {
       "when": "The task is an independent review, verification, or second opinion on a change another crewmate produced: checking a ready branch against its brief, hunting regressions, or judging whether tests actually prove the behavior.",
       "use": [
         {
           "harness": "pi",
-          "model": "openai-codex/gpt-6-astra",
+          "model": "openai-codex/gpt-5.6-sol",
           "effort": "high",
           "provider": "codex"
         },
         {
           "harness": "claude",
-          "model": "opus",
+          "model": "claude-opus-5-5",
           "effort": "high",
           "provider": "claude"
         }
@@ -133,13 +133,13 @@
       "use": [
         {
           "harness": "pi",
-          "model": "openai-codex/gpt-6-luna",
+          "model": "openai-codex/gpt-5.6-luna",
           "effort": "medium",
           "provider": "codex"
         },
         {
           "harness": "claude",
-          "model": "sonnet",
+          "model": "claude-sonnet-5",
           "effort": "medium",
           "provider": "claude"
         }
@@ -150,13 +150,13 @@
   "default": [
     {
       "harness": "claude",
-      "model": "opus",
+      "model": "claude-opus-5-5",
       "effort": "medium",
       "provider": "claude"
     },
     {
       "harness": "pi",
-      "model": "openai-codex/gpt-6-astra",
+      "model": "openai-codex/gpt-5.6-sol",
       "effort": "medium",
       "provider": "codex"
     }

@@ -98,6 +98,33 @@ The delivery mode is the same on most ship briefs and says nothing about difficu
 These live runs cover the scout line, the free-form whole-brief fallback, the ship-brief package, the top-tier floor turning the pick `ambiguous`, and the fallback to a runner-up.
 The remaining behavior is covered only by the offline tests below: a fenced heading inside a section, the boundaries of the global 0.6 confidence check with no declared floors, the probability-based floor examples, the tie case, and rejection of an out-of-range `min_confidence`.
 
+## Local classifier against typesafe.ai
+
+Run 2026-10-27 on one Linux box (2 CPUs) with the secure track's eight-rule file, the shipped neutral none option, and airgap on for every local run.
+Only models available on the work deployment were used: Claude Haiku 4.5, Sonnet 5, and Opus 5.5 through `claude`, and gpt-5.6-luna and gpt-5.6-sol through Pi.
+Corpus: 45 synthetic briefs (five per rule plus five with no matching rule, nine of them deliberately borderline with an accepted alternate label) and the eight real route-probe briefs from 2026-10-26, each run twice per classifier, one brief at a time.
+Typesafe.ai `jev-latest` (answering as `jev-1.14.0`) ran the same briefs from a home without airgap.
+The harness, corpus, labels, and raw outputs live with the comparison runner outside this repository.
+
+| Classifier | Right rule | Borderline right | Clear and right | Clear and wrong | Handed back | Destructive gated | Same pick both runs | Same pick as Jev | Median / p90 ms | Tokens in / out |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| typesafe.ai Jev | 94.3% | 100% | 75.5% | 2.8% | 21.7% | 10/10 | 100% | - | 445 / 795 | 973 / 97 |
+| `pi openai-codex/gpt-5.6-sol 3` | 98.1% | 100% | 86.8% | 1.9% | 11.3% | 10/10 | 100% | 96.2% | 7,162 / 9,666 | 2,283 / 305 |
+| `claude claude-opus-5-5 3` | 96.2% | 100% | 77.4% | 1.9% | 20.8% | 10/10 | 100% | 94.3% | 5,639 / 8,166 | 7,126 / 695 |
+| `pi openai-codex/gpt-5.6-luna 3` | 92.5% | 100% | 82.1% | 5.7% | 12.3% | 10/10 | 98.1% | 95.3% | 6,241 / 7,983 | 2,294 / 295 |
+| `claude claude-haiku-4-5 3` | 91.5% | 88.9% | 69.8% | 4.7% | 25.5% | 9/10 | 92.5% | 86.8% | 8,029 / 10,004 | 6,088 / 1,938 |
+| `claude claude-sonnet-5 3` | 89.6% | 83.3% | 73.6% | 1.9% | 24.5% | 8/10 | 96.2% | 91.5% | 4,677 / 7,564 | 7,736 / 640 |
+| `claude claude-haiku-4-5 1` | 89.6% | 88.9% | 76.4% | 7.5% | 16.0% | 10/10 | 90.6% | 84.9% | 6,508 / 7,564 | 2,029 / 638 |
+
+"Right rule" counts the classifier's pick against the label or an accepted alternate; "clear and wrong" is the costly outcome, a confident profile for the wrong rule; "handed back" is `ambiguous`, `escalate`, or `error`, which returns the decision to firstmate's own intake.
+Zero runs errored. No classifier ever cleared a destructive brief for dispatch: every destructive run escalated for captain approval except the Haiku and Sonnet runs that fell just under the rule's 0.9 floor (0.888 to 0.897) and were handed back as `ambiguous`.
+Every classifier, Jev included, was weakest on briefs that match no rule; most of the clear-and-wrong results read a small well-specified feature as the large-feature rule.
+Sampling three times instead of once cut Haiku 4.5's clear-and-wrong rate from 7.5% to 4.7% and raised its run-to-run agreement from 90.6% to 92.5%.
+gpt-5.6-sol with three samples is the shipped secure-track default (`config-defaults/dispatch-classifier`); Opus 5.5 with three samples is the Claude-only alternative.
+`bin/fm-egress-audit.sh` around one live resolve per harness under airgap (`pi openai-codex/gpt-5.6-sol 3` and `claude claude-opus-5-5 1`, `UV_USE_IO_URING=0`) reported only `api.anthropic.com` and `chatgpt.com`, verdict clean: the classifier vendor plus the quota snapshot, and no `api.typesafe.ai`.
+End to end, nine route probes (one per rule plus the no-rule case) each started a fresh Opus 5.5 firstmate in the secure home with airgap on, the work-model rules, and `pi openai-codex/gpt-5.6-sol 3`: the eight dispatchable probes ran the resolver, got `clear`, and spawned the expected work-model profile, and the destructive probe stopped for captain approval before writing a brief.
+Extended thinking is off for the Claude path because Haiku 4.5 spent 774 output tokens and 8 seconds per call with it on, versus 381 and 4.9 seconds off, on the same request.
+
 ## Offline behavior
 
 `tests/fm-dispatch-resolve.test.sh` drives the public interface with a fake `curl` that records argv, the request body, the header read from file descriptor 3, and whether the secret reached its environment, plus a fake `quota-axi` that performs the same environment check.
@@ -109,7 +136,8 @@ It proves the key is absent from child environments, never appears on `curl` arg
 It proves the request uses the fixed endpoint and model, carries only the project, the brief's task sections read by the shared brief-heading parser with a scout line only for a scout brief and never a ship brief's delivery mode (or the whole brief when it has neither section), and rule Choice with one option per rule plus the fixed neutral none option, and never carries `why`, `use`, or quota.
 It proves a declared `min_confidence` is checked against the rule's own probability both as the pick and as a runner-up, a picked rule below it falls to the most probable runner-up that clears its floor, is `ambiguous` when none does or two tie, and that a file without declared floors keeps the global 0.6 floor on confidence unchanged.
 It proves the clear, fixed-floor ambiguous with candidate evidence, escalate (approval with candidate evidence, unverifiable rule floor, tie, nothing rankable), known rule-floor fall-through, known and unverifiable profile-floor evidence, explicit-provider and provider-ID enforcement, authoritative Agy and explicit-provider Gemini routing, partial providers, eligible unranked candidates and their clear-result note, concrete quota vetoes and profile-floor shortfalls taking precedence over uncertainty, account-wide quota veto, limiting-bound ranking, schema-6 account-row binding with schema-5 compatibility, missing-curl and quota-axi failures, HTTP 429 and 500, transport failure, malformed usage, zero-mass or malformed probabilities or confidence, malformed or duplicate profile, invalid selector, removed-option rejection, and out-of-range rule ID paths behave as the contract states, with configuration errors exiting 2 before any network call.
-`tests/fm-bootstrap.test.sh` proves bootstrap ignores resolver-only fields without the typed key, validates each malformed shape when the environment or home `.env` activates typed resolution, and prevents an environment-provided key from reaching child processes.
+It proves the local classifier resolves under airgap without a key and never calls `curl`, sends only the brief, project, and options (never `why`, `use`, quota, or the key), runs Claude with no tools, MCP servers, settings, extended thinking, or nonessential traffic and Pi with an explicit provider and no tools, extensions, or context files, honors `config/claude-account` and `config/pi-account` and refuses an undeclared Pi provider, averages normalized samples so disagreement lowers confidence, discloses a failed minority and turns a failed majority into `error`, lets `FM_DISPATCH_CLASSIFIER` win over the file, keeps typesafe.ai off under airgap, and exits 2 on a malformed setting.
+`tests/fm-bootstrap.test.sh` proves bootstrap ignores resolver-only fields without the typed key, validates each malformed shape when the environment or home `.env` activates typed resolution or a local classifier is set in `config/dispatch-classifier` or `FM_DISPATCH_CLASSIFIER` (a `typesafe` setting alone stays lenient), and prevents an environment-provided key from reaching child processes.
 
 ```console
 $ bash tests/fm-dispatch-resolve.test.sh | tail -1

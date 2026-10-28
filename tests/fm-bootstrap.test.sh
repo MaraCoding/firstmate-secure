@@ -1269,7 +1269,30 @@ ROWS
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
   [ -z "$out" ] || fail "typed resolution should add verified Gemini crewmate routing, got: $out"
 
+  # A local classifier turns the resolver on without a key, so it gets the
+  # same strict validation; a typesafe setting alone does not.
   rm -f "$case_dir/home/.env"
+  printf '%s\n' '{"rules":[{"when":"legacy metadata","approval":"firstmate","use":{"harness":"claude","provider":"Anthropic"}}]}' > "$case_dir/home/config/crew-dispatch.json"
+  printf '%s\n' '# classifier' 'claude claude-haiku-4-5' > "$case_dir/home/config/dispatch-classifier"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  case "$out" in
+    'CREW_DISPATCH: invalid config/crew-dispatch.json - '*) ;;
+    *) fail "a local classifier file must activate resolver-field validation, got: $out" ;;
+  esac
+  printf '%s\n' 'typesafe' > "$case_dir/home/config/dispatch-classifier"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "a typesafe classifier setting without a key must stay lenient, got: $out"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_DISPATCH_CLASSIFIER='pi openai-codex/gpt-5.6-sol 3' FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  case "$out" in
+    'CREW_DISPATCH: invalid config/crew-dispatch.json - '*) ;;
+    *) fail "FM_DISPATCH_CLASSIFIER must activate resolver-field validation, got: $out" ;;
+  esac
+  rm -f "$case_dir/home/config/dispatch-classifier"
+  printf '%s\n' '{"rules":[{"when":"gemini work","use":{"harness":"gemini","model":"gemini-3.8-flash-high","provider":"google"}}]}' > "$case_dir/home/config/crew-dispatch.json"
+
   : > "$case_dir/child-env.log"
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     TYPESAFE_API_KEY=test-key FM_TEST_CHILD_ENV_LOG="$case_dir/child-env.log" \

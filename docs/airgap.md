@@ -28,6 +28,14 @@ header. Each refusal prints one line in the shape its tool already uses when it
 is off, ending in `nothing sent`, and `bin/fm-bootstrap.sh` prints one
 `AIRGAP: on` line at session start so the state is visible.
 
+Airgap turns off typesafe.ai but not typed dispatch itself: a home can set
+`config/dispatch-classifier` to `claude <model>` or `pi <provider>/<model>` and
+the resolver asks the crew's own model vendor the same rule question, through
+the crew's own CLI and login, with nothing else. That text already reaches the
+same vendor whenever a worker starts, so the local classifier stays on under
+airgap and adds no destination (contract: `docs/configuration.md` "Local
+classifier").
+
 Removing the file turns the switch off; nothing else changes. Personal and work
 homes can therefore share one fork and differ only in that file.
 

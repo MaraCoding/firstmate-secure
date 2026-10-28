@@ -89,11 +89,15 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 . "$SCRIPT_DIR/fm-timing-lib.sh"
 # shellcheck source=bin/fm-brief-heading-lib.sh
 . "$SCRIPT_DIR/fm-brief-heading-lib.sh"
+# shellcheck source=bin/fm-worker-account-lib.sh
+. "$SCRIPT_DIR/fm-worker-account-lib.sh"
 
 CONFIDENCE_FLOOR=0.6
 TS_MODEL=jev-latest
 TS_BASE=https://api.typesafe.ai
 TS_TIMEOUT=5
+LOCAL_SAMPLES_DEFAULT=3
+LOCAL_TIMEOUT=${FM_DISPATCH_CLASSIFIER_TIMEOUT:-60}
 DEFAULT_WHEN="No listed rule applies to this task."
 
 die() { printf 'error: %s\n' "$1" >&2; exit 2; }
@@ -111,6 +115,7 @@ usage() {
 
 BRIEF='' PROJECT='' RULES_PATH="$CONFIG/crew-dispatch.json" RULES=''
 NEVER_SEND_PATH="$CONFIG/dispatch-never-send"
+CLASSIFIER_PATH="$CONFIG/dispatch-classifier"
 while [ $# -gt 0 ]; do
   case "$1" in
     --project) [ $# -ge 2 ] || die "--project needs a value"; PROJECT=$2; shift 2 ;;
@@ -120,20 +125,59 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+# ---- classifier backend (config/dispatch-classifier) ---------------------------
+# FM_DISPATCH_CLASSIFIER, when set, wins over the file, like the key above.
+CLASSIFIER_SPEC=${FM_DISPATCH_CLASSIFIER:-}
+if [ -z "$CLASSIFIER_SPEC" ] && [ -e "$CLASSIFIER_PATH" ]; then
+  [ -f "$CLASSIFIER_PATH" ] && [ -r "$CLASSIFIER_PATH" ] \
+    || die "classifier file must be a readable regular file: $CLASSIFIER_PATH"
+  CLASSIFIER_SPEC=$(grep -v -e '^[[:space:]]*#' -e '^[[:space:]]*$' "$CLASSIFIER_PATH")
+  [ "$(printf '%s\n' "$CLASSIFIER_SPEC" | grep -c .)" -le 1 ] \
+    || die "classifier file must hold one setting line: $CLASSIFIER_PATH"
+fi
+LOCAL_HARNESS='' LOCAL_MODEL='' LOCAL_SAMPLES=$LOCAL_SAMPLES_DEFAULT
+# shellcheck disable=SC2086  # Word splitting is the parse.
+set -- $CLASSIFIER_SPEC
+case "${1:-typesafe}" in
+  typesafe)
+    [ $# -le 1 ] || die "classifier 'typesafe' takes no arguments"
+    ;;
+  claude|pi)
+    [ $# -ge 2 ] && [ $# -le 3 ] || die "classifier must be: typesafe | claude <model> [samples] | pi <provider>/<model> [samples]"
+    LOCAL_HARNESS=$1 LOCAL_MODEL=$2 LOCAL_SAMPLES=${3:-$LOCAL_SAMPLES_DEFAULT}
+    case "$LOCAL_SAMPLES" in
+      [1-9]) ;;
+      *) die "classifier samples must be 1 through 9: $LOCAL_SAMPLES" ;;
+    esac
+    if [ "$LOCAL_HARNESS" = pi ]; then
+      fm_worker_account_pi_provider "$LOCAL_MODEL" >/dev/null \
+        || die "pi classifier model must be <provider>/<model>: $LOCAL_MODEL"
+    fi
+    ;;
+  *) die "unknown classifier '$1' (typesafe | claude <model> [samples] | pi <provider>/<model> [samples])" ;;
+esac
+set --
+case "$LOCAL_TIMEOUT" in
+  ''|*[!0-9]*|0) die "FM_DISPATCH_CLASSIFIER_TIMEOUT must be a positive whole number of seconds" ;;
+esac
+
 # ---- airgap kill switch (bin/fm-airgap-lib.sh) ---------------------------------
 # Checked before the key so an environment-supplied key is ignored too. Same
 # exit and same stderr shape as the absent-key off path: nothing sent, exit 0.
-if fm_airgap_active "$FM_HOME"; then
+# A local classifier stays on: it calls the crew's own model vendor through the
+# crew's own CLI and login, so the brief text reaches no host a worker does not.
+if fm_airgap_active "$FM_HOME" && [ -z "$LOCAL_HARNESS" ]; then
   TYPESAFE_API_KEY_PRIVATE=
   echo "dispatch-resolve: off (airgap: $(fm_airgap_reason); nothing sent)" >&2
   exit 0
 fi
+[ -z "$LOCAL_HARNESS" ] || TYPESAFE_API_KEY_PRIVATE=
 
 # ---- opt-in gate ---------------------------------------------------------------
-if [ -z "$TYPESAFE_API_KEY_PRIVATE" ]; then
+if [ -z "$LOCAL_HARNESS" ] && [ -z "$TYPESAFE_API_KEY_PRIVATE" ]; then
   TYPESAFE_API_KEY_PRIVATE=$(fmx_env_get TYPESAFE_API_KEY "$FM_HOME/.env")
 fi
-if [ -z "$TYPESAFE_API_KEY_PRIVATE" ]; then
+if [ -z "$LOCAL_HARNESS" ] && [ -z "$TYPESAFE_API_KEY_PRIVATE" ]; then
   echo "dispatch-resolve: off (TYPESAFE_API_KEY absent from the environment and $FM_HOME/.env)" >&2
   exit 0
 fi
@@ -313,8 +357,147 @@ if [ -n "$SECTIONS" ]; then
 else
   cp "$BRIEF" "$TASK_TEXT" || die "could not read brief: $BRIEF"
 fi
+# ---- local classifier (config/dispatch-classifier) -------------------------------
+# The same one question, asked LOCAL_SAMPLES times in parallel through the
+# crew's own CLI under the home's worker account pin. Each sample states a
+# probability per option; the answer is their mean (each sample normalized to
+# sum 1), the choice its argmax, and the confidence the choice's mean
+# probability, written in the Choice answer shape Jev returns so every gate
+# below applies unchanged. Fewer than a majority of usable samples is an error.
+LOCAL_SYSTEM='You route software tasks to the right worker profile. Read one task brief and judge which dispatch rule fits it. Never do the task itself. Reply with one JSON object and nothing else.'
+
+local_prompt() {
+  jq -r '
+    .questions.rule as $q |
+    "Project: \(if .state.task.project == "" then "(unnamed)" else .state.task.project end)\n\n"
+    + "Task brief:\n<<<\n\(.state.task.brief)\n>>>\n\n"
+    + "Question: \($q.instructions)\n\nOptions:\n"
+    + ([$q.criteria | to_entries[] | "- \(.key): \(.value)"] | join("\n"))
+    + "\n\nReturn {\"choice\": \"<option id>\", \"probabilities\": {\"<option id>\": <number>, ...}} with a probability for every option id."
+    + " Each probability is your belief that the option is the right one; they sum to 1."
+    + " Spread probability when the task is ambiguous or fits more than one option, and give values near 1 only to clear cases."' <<<"$REQUEST"
+}
+
+local_schema() {
+  jq -c '[.questions.rule.criteria | keys[]] as $ids | {
+    type: "object",
+    properties: {
+      choice: {type: "string", enum: $ids},
+      probabilities: {type: "object", properties: ($ids | map({key: ., value: {type: "number"}}) | from_entries), required: $ids, additionalProperties: false}
+    },
+    required: ["choice", "probabilities"], additionalProperties: false}' <<<"$REQUEST"
+}
+
+# local_sample <n>: one call; leaves $LOCAL_DIR/s<n>.json holding
+# {answer, usage} on success and nothing usable otherwise.
+local_sample() {
+  local n=$1 raw="$LOCAL_DIR/r$1.raw"
+  case "$LOCAL_HARNESS" in
+    claude)
+      # fm_run_timed backgrounds the command, which detaches stdin, so the
+      # prompt redirect happens inside the bounded command itself.
+      # shellcheck disable=SC2016  # $1 and $@ expand in the inner sh.
+      (cd "$LOCAL_DIR" && fm_run_timed "$LOCAL_TIMEOUT" "${LOCAL_ENV[@]}" CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 MAX_THINKING_TOKENS=0 \
+        sh -c 'f=$1; shift; exec "$@" < "$f"' sh "$LOCAL_DIR/prompt" \
+        claude -p --model "$LOCAL_MODEL" --output-format json --json-schema "$LOCAL_SCHEMA" \
+        --tools "" --strict-mcp-config --setting-sources "" --no-session-persistence \
+        --disable-slash-commands --system-prompt "$LOCAL_SYSTEM" \
+        > "$raw" 2> "$LOCAL_DIR/e$n.err")
+      jq -c 'select(.is_error == false and (.structured_output | type) == "object") | {
+        answer: .structured_output,
+        usage: {input_tokens: ((.usage.input_tokens // 0) + (.usage.cache_creation_input_tokens // 0) + (.usage.cache_read_input_tokens // 0)),
+                output_tokens: (.usage.output_tokens // 0)}}' "$raw" > "$LOCAL_DIR/s$n.json" 2>/dev/null
+      ;;
+    pi)
+      (cd "$LOCAL_DIR" && fm_run_timed "$LOCAL_TIMEOUT" "${LOCAL_ENV[@]}" \
+        pi -p --no-tools --no-extensions --no-skills --no-prompt-templates --no-themes \
+        --no-context-files --no-session --offline --provider "$LOCAL_PROVIDER" --model "$LOCAL_MODEL" \
+        --thinking low --mode json --system-prompt "$LOCAL_SYSTEM" "@$LOCAL_DIR/prompt" \
+        > "$raw" 2> "$LOCAL_DIR/e$n.err" < /dev/null)
+      jq -c 'select(.type == "agent_end") | .messages[-1] | select(.role == "assistant") |
+        ([.content[]? | select(.type == "text") | .text] | join("")
+          | sub("^\\s*```(json)?\\s*"; "") | sub("\\s*```\\s*$"; "") | try fromjson catch null) as $a |
+        select($a | type == "object") |
+        {answer: $a, usage: {input_tokens: (.usage.input // 0), output_tokens: (.usage.output // 0)}}' \
+        "$raw" > "$LOCAL_DIR/s$n.json" 2>/dev/null
+      ;;
+  esac
+  return 0
+}
+
+classify_local() {
+  local selection root providers i ok need label detail
+  LOCAL_DIR=$(mktemp -d) || emit_error "mktemp failed"
+  trap 'rm -f "$RULES" "$RESP_FILE" "$QUOTA" "$TASK_TEXT" "$SEND_TEXT"; rm -rf "$LOCAL_DIR"' EXIT
+  LOCAL_ENV=(env)
+  LOCAL_PROVIDER=''
+  # The classifier spends on the same account the home pins its workers to.
+  selection=$(fm_worker_account_resolve "$LOCAL_HARNESS" "$CONFIG" "config/$(fm_worker_account_file "$LOCAL_HARNESS")" 2>"$LOCAL_DIR/pin.err") \
+    || emit_error "worker account pin: $(head -c 300 "$LOCAL_DIR/pin.err" | tr '\n' ' ')"
+  if [ -n "$selection" ]; then
+    root=${selection#*$'\t'}
+    providers=${root#*$'\t'}
+    root=${root%%$'\t'*}
+  fi
+  case "$LOCAL_HARNESS" in
+    claude)
+      if [ -n "$selection" ]; then
+        # shellcheck disable=SC2207  # The shed prefix is plain words.
+        LOCAL_ENV=($(fm_worker_account_claude_shed))
+        if [ -n "$root" ]; then LOCAL_ENV+=("CLAUDE_CONFIG_DIR=$root"); else LOCAL_ENV+=(-u CLAUDE_CONFIG_DIR); fi
+      fi
+      ;;
+    pi)
+      LOCAL_PROVIDER=$(fm_worker_account_pi_provider "$LOCAL_MODEL")
+      if [ -n "$selection" ]; then
+        case " $providers " in
+          *" $LOCAL_PROVIDER "*) ;;
+          *) emit_error "config/pi-account does not declare provider $LOCAL_PROVIDER" ;;
+        esac
+        LOCAL_ENV+=("PI_CODING_AGENT_DIR=$root")
+      fi
+      ;;
+  esac
+  local_prompt > "$LOCAL_DIR/prompt" || emit_error "could not build the classifier prompt"
+  LOCAL_SCHEMA=$(local_schema) || emit_error "could not build the classifier schema"
+  for i in $(seq 1 "$LOCAL_SAMPLES"); do
+    local_sample "$i" &
+  done
+  wait
+  ok=0
+  for i in $(seq 1 "$LOCAL_SAMPLES"); do
+    [ -s "$LOCAL_DIR/s$i.json" ] && ok=$((ok + 1))
+  done
+  need=$(( (LOCAL_SAMPLES + 1) / 2 ))
+  if [ "$ok" -lt "$need" ]; then
+    detail=$(cat "$LOCAL_DIR"/e*.err "$LOCAL_DIR"/r*.raw 2>/dev/null | grep -m1 . | head -c 200)
+    emit_error "local classifier $LOCAL_HARNESS:$LOCAL_MODEL answered $ok of $LOCAL_SAMPLES samples${detail:+: $detail}"
+  fi
+  label="$LOCAL_HARNESS:$LOCAL_MODEL x$ok"
+  [ "$ok" -eq "$LOCAL_SAMPLES" ] || label="$label of $LOCAL_SAMPLES"
+  cat "$LOCAL_DIR"/s*.json | jq -s --arg model "$label" --argjson ids "$(jq -c '[.questions.rule.criteria | keys[]]' <<<"$REQUEST")" '
+    def norm($p):
+      ($ids | map(. as $id | {key: $id, value: (($p[$id] // 0) | if type == "number" and . > 0 then . else 0 end)}) | from_entries) as $c
+      | ([$c[]] | add) as $t
+      | if $t > 0 then ($c | map_values(. / $t)) else null end;
+    [.[] | (.answer.probabilities | if type == "object" then norm(.) else null end) as $n
+         | select($n != null) | {n: $n, c: .answer.choice, u: .usage}] as $ok |
+    if ($ok | length) == 0 then error("no usable sample") else . end |
+    ($ids | map(. as $id | {key: $id, value: ([$ok[].n[$id]] | add / length * 10000 | round / 10000)}) | from_entries) as $mean |
+    ($ids | map(. as $id | {key: $id, value: ([$ok[] | select(.c == $id)] | length)}) | from_entries) as $votes |
+    ($ids | to_entries | sort_by([-$mean[.value], -$votes[.value], .key]) | first.value) as $choice |
+    {model: $model,
+     answers: {rule: {choice: $choice, confidence: $mean[$choice], probabilities: $mean}},
+     usage: {input_tokens: ([$ok[].u.input_tokens // 0] | add), output_tokens: ([$ok[].u.output_tokens // 0] | add)}}
+  ' > "$RESP_FILE" 2>/dev/null || emit_error "local classifier $LOCAL_HARNESS:$LOCAL_MODEL gave no usable probabilities"
+}
+
 LAT_MS=null
-command -v curl >/dev/null 2>&1 || emit_error "curl not installed"
+if [ -z "$LOCAL_HARNESS" ]; then
+  command -v curl >/dev/null 2>&1 || emit_error "curl not installed"
+else
+  command -v "$LOCAL_HARNESS" >/dev/null 2>&1 || emit_error "$LOCAL_HARNESS not installed"
+fi
   REQUEST=$(jq -n --rawfile brief "$TASK_TEXT" --arg project "$PROJECT" --arg model "$TS_MODEL" \
     --arg none_criterion "$DEFAULT_WHEN" --slurpfile rules "$RULES" '
     ($rules[0]) as $cfg |
@@ -332,6 +515,11 @@ command -v curl >/dev/null 2>&1 || emit_error "curl not installed"
     }')
   never_send_check
   T0=$(fm_timing_now_ms)
+if [ -n "$LOCAL_HARNESS" ]; then
+  classify_local
+  T1=$(fm_timing_now_ms)
+  LAT_MS=$(( T1 - T0 ))
+else
   HTTP=$(printf '%s' "$REQUEST" | curl -sS --max-time "$TS_TIMEOUT" -o "$RESP_FILE" -w '%{http_code}' \
     -X POST "$TS_BASE/v1/systemone" -H 'Content-Type: application/json' \
     -H @/dev/fd/3 3< <(printf 'Authorization: Bearer %s\n' "$TYPESAFE_API_KEY_PRIVATE") \
@@ -339,6 +527,7 @@ command -v curl >/dev/null 2>&1 || emit_error "curl not installed"
   T1=$(fm_timing_now_ms)
   LAT_MS=$(( T1 - T0 ))
   [ "$HTTP" = 200 ] || emit_error "http $HTTP after ${LAT_MS} ms: $(head -c 200 "$RESP_FILE" 2>/dev/null | tr '\n' ' ')"
+fi
 jq -e --slurpfile rules "$RULES" '
     (($rules[0].rules | to_entries | map("rule_" + ((.key + 1) | tostring))) + ["default"] | sort) as $choices |
     (.answers.rule.choice | type) == "string" and

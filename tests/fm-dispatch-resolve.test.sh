@@ -1005,4 +1005,196 @@ expect_code 0 "$code" "--help exits 0"
 assert_contains "$out" 'Usage:' "--help prints usage"
 pass "configuration errors exit 2 before any network call"
 
+# --- local classifier (config/dispatch-classifier) ---------------------------
+# Fake claude and pi record argv, stdin, and the credential-relevant
+# environment, take the next free answer slot atomically (samples run in
+# parallel), and answer with $FAKE_LOCAL_DIR/answer<slot>.json or answer.json.
+FAKE_LOCAL_DIR="$TMP_ROOT/local"
+CLASSIFIER="$HOME_DIR/config/dispatch-classifier"
+mkdir -p "$FAKE_LOCAL_DIR"
+for fake in claude pi; do
+  cat > "$FAKEBIN/$fake" <<'SH'
+#!/usr/bin/env bash
+set -u
+me=$(basename "$0")
+slot=1
+until mkdir "${FAKE_CURL_LOG:?}/$me-slot$slot" 2>/dev/null; do slot=$((slot + 1)); done
+d="$FAKE_CURL_LOG/$me-slot$slot"
+printf '%s\n' "$@" > "$d/argv"
+cat > "$d/stdin"
+{
+  printf 'TYPESAFE=%s\n' "${TYPESAFE_API_KEY+set}${TYPESAFE_API_KEY_PRIVATE+set}"
+  printf 'CLAUDE_CONFIG_DIR=%s\n' "${CLAUDE_CONFIG_DIR-unset}"
+  printf 'ANTHROPIC_API_KEY=%s\n' "${ANTHROPIC_API_KEY-unset}"
+  printf 'PI_CODING_AGENT_DIR=%s\n' "${PI_CODING_AGENT_DIR-unset}"
+  printf 'NONESSENTIAL=%s\n' "${CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC-unset}"
+  printf 'MAX_THINKING_TOKENS=%s\n' "${MAX_THINKING_TOKENS-unset}"
+} > "$d/env"
+answer="${FAKE_LOCAL_DIR:?}/answer$slot.json"
+[ -f "$answer" ] || answer="$FAKE_LOCAL_DIR/answer.json"
+[ -s "$answer" ] || exit 1
+if [ "$me" = claude ]; then
+  jq -c '{is_error: false, structured_output: ., usage: {input_tokens: 100, cache_read_input_tokens: 50, output_tokens: 20}}' "$answer"
+else
+  jq -c '{type: "agent_end", messages: [{role: "assistant", content: [{type: "text", text: ("```json\n" + tojson + "\n```")}], usage: {input: 120, output: 30}}]}' "$answer"
+fi
+SH
+  chmod +x "$FAKEBIN/$fake"
+done
+export FAKE_LOCAL_DIR
+local_answer() {  # <path> <choice> <rule_1> <rule_2> <rule_3> <rule_4> <default>
+  printf '{"choice":"%s","probabilities":{"rule_1":%s,"rule_2":%s,"rule_3":%s,"rule_4":%s,"default":%s}}\n' "$2" "$3" "$4" "$5" "$6" "$7" > "$1"
+}
+reset_local() {
+  reset_log
+  rm -f "$FAKE_LOCAL_DIR"/answer*.json "$HOME_DIR/config/airgap" "$CLASSIFIER" "$HOME_DIR/config/claude-account" "$HOME_DIR/config/pi-account"
+  cp "$BASE_RULES" "$RULES"
+}
+
+# Airgap on, key present: a local claude classifier still resolves, never
+# calls typesafe.ai, and sends the model only the brief and the options.
+reset_local
+touch "$HOME_DIR/config/airgap"
+printf '%s\n' '# classifier' 'claude claude-haiku-4-5' > "$CLASSIFIER"
+local_answer "$FAKE_LOCAL_DIR/answer.json" rule_4 0.01 0.01 0.01 0.95 0.02
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --project pager
+expect_code 0 "$code" "local classifier exits 0 under airgap"
+assert_contains "$out" '  status: clear' "local classifier resolves under airgap"
+assert_contains "$out" '  model: claude:claude-haiku-4-5 x3   latency_ms: ' "the model line names the local classifier and its sample count"
+assert_contains "$out" 'tokens: 450/60' "token usage sums every sample, cache reads included"
+assert_contains "$out" '  rule: rule_4 (A simple bug fix with a stated root cause.)   confidence: 0.95' "the mean probability is the confidence"
+assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-medium'" "the spendPriority argmax applies unchanged"
+assert_absent "$LOG/argv" "a local classifier never calls curl"
+for slot in 1 2 3; do
+  assert_present "$LOG/claude-slot$slot/argv" "sample $slot ran"
+done
+assert_absent "$LOG/claude-slot4" "exactly three samples by default"
+argv=$(cat "$LOG/claude-slot1/argv")
+assert_contains "$argv" $'--model\nclaude-haiku-4-5' "the configured model is passed"
+assert_contains "$argv" $'--tools\n\n' "the classifier gets no tools"
+assert_contains "$argv" '--strict-mcp-config' "the classifier loads no MCP servers"
+assert_contains "$argv" $'--setting-sources\n\n' "the classifier loads no settings, hooks, or CLAUDE.md"
+assert_contains "$argv" '"enum":["default","rule_1","rule_2","rule_3","rule_4"]' "the schema allows exactly the rule options"
+prompt=$(cat "$LOG/claude-slot1/stdin")
+assert_contains "$prompt" 'off-by-one in the pager' "the brief reaches the classifier on stdin"
+assert_contains "$prompt" '- rule_4: A simple bug fix with a stated root cause.' "each rule when text is an option"
+assert_contains "$prompt" 'Project: pager' "the project rides in the prompt"
+assert_not_contains "$prompt" 'SECRET-WHY-TEXT' "why text never reaches the classifier"
+assert_not_contains "$prompt" 'cursor-grok' "use profiles never reach the classifier"
+assert_not_contains "$argv$prompt" "$KEY" "the typesafe key never reaches the classifier"
+env_seen=$(cat "$LOG/claude-slot1/env")
+assert_contains "$env_seen" $'TYPESAFE=\n' "the typesafe key is absent from the classifier environment"
+assert_contains "$env_seen" 'NONESSENTIAL=1' "nonessential Claude traffic is off"
+assert_contains "$env_seen" 'MAX_THINKING_TOKENS=0' "extended thinking is off for a routing call"
+assert_contains "$env_seen" 'CLAUDE_CONFIG_DIR=unset' "no pin keeps the ambient Claude account"
+pass "local claude classifier: works under airgap, sends only brief and options, never calls typesafe.ai"
+
+# Samples are averaged: the choice is the argmax of the mean, and a mean below
+# the floor is ambiguous exactly as a low Jev confidence is.
+reset_local
+printf '%s\n' 'claude claude-haiku-4-5' > "$CLASSIFIER"
+local_answer "$FAKE_LOCAL_DIR/answer1.json" rule_4 0 0 0 0.9 0.1
+local_answer "$FAKE_LOCAL_DIR/answer2.json" rule_4 0 0 0 0.5 0.5
+local_answer "$FAKE_LOCAL_DIR/answer3.json" default 0 0 0 0.3 0.7
+run code out err "$BRIEF" --project pager
+assert_contains "$out" '  status: ambiguous' "a split vote below the floor is ambiguous"
+assert_contains "$out" 'confidence: 0.5667' "confidence is the mean probability of the choice"
+assert_contains "$out" 'rule_4=0.5667' "probabilities are the per-option mean"
+assert_contains "$out" 'default=0.4333' "probabilities are the per-option mean"
+local_answer "$FAKE_LOCAL_DIR/answer3.json" rule_4 0 0 0 4 1
+reset_log
+run code out err "$BRIEF" --project pager
+assert_contains "$out" 'rule_4=0.7333' "each sample is normalized to sum 1 before averaging"
+pass "local samples average into one distribution; low agreement is ambiguous"
+
+# A failed minority still answers and says so; a failed majority is an error.
+reset_local
+printf '%s\n' 'claude claude-haiku-4-5 3' > "$CLASSIFIER"
+local_answer "$FAKE_LOCAL_DIR/answer.json" rule_4 0 0 0 1 0
+: > "$FAKE_LOCAL_DIR/answer3.json"
+run code out err "$BRIEF" --project pager
+assert_contains "$out" '  status: clear' "two of three samples still resolve"
+assert_contains "$out" 'model: claude:claude-haiku-4-5 x2 of 3' "a missing sample is disclosed"
+: > "$FAKE_LOCAL_DIR/answer2.json"
+reset_log
+run code out err "$BRIEF" --project pager
+expect_code 0 "$code" "a failed majority exits 0"
+assert_contains "$out" '  status: error' "a failed majority is an error outcome"
+assert_contains "$out" 'answered 1 of 3 samples' "the error names how many samples answered"
+assert_absent "$LOG/quota-axi.calls" "a classifier error never reads quota"
+pass "local classifier needs a majority of samples"
+
+# The pi classifier passes its provider explicitly, the prompt as a file, and
+# runs under the home's Pi pin.
+reset_local
+PI_ROOT="$TMP_ROOT/pi-root"
+mkdir -p "$PI_ROOT"
+printf '%s\n' "$PI_ROOT" 'openai-codex' > "$HOME_DIR/config/pi-account"
+printf '%s\n' 'pi openai-codex/gpt-5.6-luna 1' > "$CLASSIFIER"
+local_answer "$FAKE_LOCAL_DIR/answer.json" rule_2 0 0.9 0 0.05 0.05
+run code out err "$BRIEF" --project pager
+assert_contains "$out" '  status: clear' "pi classifier resolves"
+assert_contains "$out" '  model: pi:openai-codex/gpt-5.6-luna x1 ' "pi model line"
+assert_contains "$out" 'tokens: 120/30' "pi usage is read from the final message"
+argv=$(cat "$LOG/pi-slot1/argv")
+assert_contains "$argv" $'--provider\nopenai-codex' "pi gets its provider explicitly"
+assert_contains "$argv" '--no-tools' "pi classifier gets no tools"
+assert_contains "$argv" '--no-context-files' "pi classifier loads no AGENTS.md or CLAUDE.md"
+assert_contains "$argv" '--no-extensions' "pi classifier loads no extensions"
+assert_contains "$argv" '/prompt' "the prompt rides as an @file"
+assert_contains "$(cat "$LOG/pi-slot1/env")" "PI_CODING_AGENT_DIR=$PI_ROOT" "the pinned Pi root is selected"
+printf '%s\n' "$PI_ROOT" 'anthropic' > "$HOME_DIR/config/pi-account"
+reset_log
+run code out err "$BRIEF" --project pager
+assert_contains "$out" 'config/pi-account does not declare provider openai-codex' "an undeclared provider is refused, not guessed"
+assert_absent "$LOG/pi-slot1" "an undeclared provider never runs pi"
+pass "local pi classifier: explicit provider, prompt file, pinned root"
+
+# A Claude pin selects its root and sheds outranking credentials.
+reset_local
+CLAUDE_ROOT="$TMP_ROOT/claude-root"
+mkdir -p "$CLAUDE_ROOT"
+printf '%s\n' "$CLAUDE_ROOT" > "$HOME_DIR/config/claude-account"
+printf '%s\n' 'claude claude-sonnet-5 1' > "$CLASSIFIER"
+local_answer "$FAKE_LOCAL_DIR/answer.json" rule_4 0 0 0 1 0
+ANTHROPIC_API_KEY=ambient run code out err "$BRIEF" --project pager
+env_seen=$(cat "$LOG/claude-slot1/env")
+assert_contains "$env_seen" "CLAUDE_CONFIG_DIR=$CLAUDE_ROOT" "the pinned Claude root is selected"
+assert_contains "$env_seen" 'ANTHROPIC_API_KEY=unset' "an ambient API key cannot outrank the pin"
+pass "local claude classifier honors config/claude-account"
+
+# Selection: the environment wins over the file, and typesafe stays the default.
+reset_local
+printf '%s\n' 'claude claude-haiku-4-5' > "$CLASSIFIER"
+write_response "$RESPONSE" rule_4 0.9
+FM_DISPATCH_CLASSIFIER=typesafe TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --project pager
+assert_present "$LOG/argv" "FM_DISPATCH_CLASSIFIER=typesafe overrides a local file"
+assert_absent "$LOG/claude-slot1" "the overridden local classifier never runs"
+touch "$HOME_DIR/config/airgap"
+reset_log
+FM_DISPATCH_CLASSIFIER=typesafe TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --project pager
+assert_contains "$err" 'dispatch-resolve: off (airgap:' "typesafe stays off under airgap"
+assert_absent "$LOG/argv" "typesafe under airgap never calls curl"
+pass "classifier selection: environment over file; typesafe still airgapped"
+
+# Missing CLI is an error outcome; malformed settings are configuration errors.
+reset_local
+printf '%s\n' 'claude claude-haiku-4-5' > "$CLASSIFIER"
+for command_name in grep seq; do
+  ln -sf "$(command -v "$command_name")" "$NO_CURL_BIN/$command_name"
+done
+run_without_curl code out err "$BRIEF"
+expect_code 0 "$code" "missing classifier CLI exits 0"
+assert_contains "$out" '  reason: claude not installed' "missing classifier CLI is named"
+for bad in 'claude' 'claude haiku 0' 'claude haiku 12' 'pi gpt-5.6-luna' 'typesafe extra' 'grok grok-5' $'claude a\nclaude b'; do
+  printf '%s\n' "$bad" > "$CLASSIFIER"
+  run code out err "$BRIEF"
+  expect_code 2 "$code" "malformed classifier setting exits 2: $(printf '%s' "$bad" | tr '\n' '|')"
+done
+rm -f "$CLASSIFIER"
+FM_DISPATCH_CLASSIFIER='claude haiku' FM_DISPATCH_CLASSIFIER_TIMEOUT=0 run code out err "$BRIEF"
+expect_code 2 "$code" "a zero classifier timeout exits 2"
+pass "local classifier configuration errors exit 2; a missing CLI is an error outcome"
+reset_local
+
 printf '# all fm-dispatch-resolve tests passed\n'
