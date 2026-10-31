@@ -2398,8 +2398,10 @@ launch_template() {
   # Claude Code's --settings flag takes one value, a file path or an inline
   # JSON string (https://code.claude.com/docs/en/cli-reference). A secondmate's
   # busy hooks share that value, in state/<id>.claude-settings.json, and the
-  # file also carries feedbackDrafts and attribution so those session keys
-  # stay in force.
+  # file also carries feedbackDrafts, attribution, and autoCompactWindow so
+  # those session keys stay in force. All Claude launches use a fixed 272000-token
+  # auto-compact window, including persistent secondmates to bound their context
+  # growth too; this never changes the primary session's settings.
   # __CLAUDEPERMFLAG__ is the permission flag config/claude-permission-mode
   # selects (header above): --dangerously-skip-permissions by default, or
   # --permission-mode auto for a captain who refuses bypass mode.
@@ -5447,9 +5449,9 @@ BUSY_GEN=
     fi
     hooks_json="\"hooks\":{\"UserPromptSubmit\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"$j_submit\"}]}],${stop_entry}\"StopFailure\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"$j_stopfail\"}]}],\"SessionEnd\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"$j_sessionend\"}]}]}"
     if [ "$KIND" = secondmate ]; then
-      session_keys='"feedbackDrafts":"off",'
+      session_keys='"feedbackDrafts":"off","autoCompactWindow":272000,'
       if [ "$KEEP_AI_TRAILERS" != 1 ]; then
-        session_keys='"feedbackDrafts":"off","attribution":{"commit":"","pr":"","sessionUrl":false},'
+        session_keys='"feedbackDrafts":"off","autoCompactWindow":272000,"attribution":{"commit":"","pr":"","sessionUrl":false},'
       fi
       printf '{%s%s}\n' "$session_keys" "$hooks_json" >"$STATE_REAL/$ID.claude-settings.json"
     else
@@ -6119,7 +6121,7 @@ case "$LAUNCH" in
   if [ "$KIND" = secondmate ]; then
     LAUNCH=${LAUNCH//__CLAUDESETTINGS__/$(shell_quote "$STATE_REAL/$ID.claude-settings.json")}
   else
-    claude_settings="'{\"feedbackDrafts\":\"off\"__CLAUDEATTRIBUTION__}'"
+    claude_settings="'{\"feedbackDrafts\":\"off\",\"autoCompactWindow\":272000__CLAUDEATTRIBUTION__}'"
     LAUNCH=${LAUNCH//__CLAUDESETTINGS__/$claude_settings}
   fi
   ;;

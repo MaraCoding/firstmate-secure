@@ -1040,7 +1040,9 @@ Pi-family secondmates can start unattended in Firstmate-seeded homes without acc
 For omp secondmate launches, `fm-spawn.sh` names only the parent home's `state/<id>.omp-ext.ts` busy extension with `-e`: omp auto-discovers the home's tracked `.omp/extensions/` with no trust gate, and naming a discovered file with `-e` as well loads it twice; every omp launch also carries the tracked `.omp/fm-worker-overlay.yml` posture overlay through `--config`, which [`fm-spawn.sh --help`](../bin/fm-spawn.sh) owns.
 
 For a Claude secondmate, `fm-spawn.sh` writes the busy hooks into the parent home's `state/<id>.claude-settings.json` and passes that file as Claude Code's one `--settings` value.
-The same file carries `feedbackDrafts` and, unless `config/keep-ai-trailers` is present, the attribution policy every other Claude launch puts in its inline `--settings` JSON.
+The same file carries `feedbackDrafts`, `autoCompactWindow`, and, unless `config/keep-ai-trailers` is present, the attribution policy every other Claude launch puts in its inline `--settings` JSON.
+Claude crewmates, scouts, and secondmates use a fixed 272000-token auto-compact window to bound context growth, without changing the primary session's settings or any other harness.
+`bin/fm-spawn.sh` owns the per-launch settings mechanics.
 Claude Code applies `--settings` for that session and does not write the file into the mate home.
 A key the file sets overrides the same key in user, project, and local settings.
 A key it omits keeps the file-based value, so a `.claude/settings.local.json` already in the home is left untouched.
