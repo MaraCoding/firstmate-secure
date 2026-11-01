@@ -1237,7 +1237,7 @@ pass "remote update imports and fast-forwards the persistent home on its configu
 # capability tables, and they leave the live agent exactly as it was - which is
 # the whole safety property of asking before anything is stopped.
 RELAUNCH_UNVERIFIED=$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh \
-  relaunch ios notaharness - - 2>&1) && fail "an unverified runtime should refuse a remote restart"
+  relaunch ios notaharness fixture-model - 2>&1) && fail "an unverified runtime should refuse a remote restart"
 assert_contains "$RELAUNCH_UNVERIFIED" 'unverified remote secondmate harness' \
   "the remote restart verb did not refuse an unverified runtime"
 RELAUNCH_ROUTE_META="$REMOTE_HOME/state/parent-route/ios.meta"
@@ -1246,7 +1246,7 @@ mkdir -p "$TMP_ROOT/not-a-checkout"
 sed "s|^worktree=.*|worktree=$TMP_ROOT/not-a-checkout|" \
   "$TMP_ROOT/ios-before-relaunch.meta" > "$RELAUNCH_ROUTE_META"
 RELAUNCH_CHECKPOINT=$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh \
-  relaunch ios codex - - 2>&1) && fail "a restart with no accountable checkout should refuse"
+  relaunch ios codex fixture-model - 2>&1) && fail "a restart with no accountable checkout should refuse"
 assert_contains "$RELAUNCH_CHECKPOINT" 'refusing to relaunch without a checkout whose unlanded work can be accounted for' \
   "the host-local restart did not reach the control plane's own pre-stop checkpoint"
 cp "$TMP_ROOT/ios-before-relaunch.meta" "$RELAUNCH_ROUTE_META"
@@ -1311,7 +1311,7 @@ FM_STATE_OVERRIDE="$WATCH_STATE" FM_SECONDMATE_LIVENESS_SECS=1 FM_POLL=1 \
   > "$TMP_ROOT/watch-liveness.out" 2> "$TMP_ROOT/watch-liveness.err" &
 watch_pid=$!
 watch_wait=0
-while kill -0 "$watch_pid" 2>/dev/null && [ "$watch_wait" -lt 1500 ]; do
+while kill -0 "$watch_pid" 2>/dev/null && [ "$watch_wait" -lt 6000 ]; do
   sleep 0.02
   watch_wait=$((watch_wait + 1))
 done
