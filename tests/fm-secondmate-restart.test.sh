@@ -199,6 +199,7 @@ add_repo_backed_mate() {  # <case-dir> <id> [harness] [backend]
     git -C "$dir/origin.git" symbolic-ref HEAD refs/heads/main
     git clone -q "$dir/origin.git" "$dir/seed" 2>/dev/null
     mkdir -p "$dir/seed/bin" "$dir/seed/.agents/skills"
+    cp -R "$ROOT/bin/." "$dir/seed/bin/"
     printf '# agents\n' > "$dir/seed/AGENTS.md"
     printf 'echo a\n' > "$dir/seed/bin/tool.sh"
     printf 's1\n' > "$dir/seed/.agents/skills/note.md"
@@ -252,8 +253,9 @@ arm_answer() {
 }
 
 run_restart() {  # <case-dir> <args...>
-  local dir=$1; shift
-  env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
+  local dir=$1 root=$ROOT; shift
+  [ ! -d "$dir/fmrepo" ] || root="$dir/fmrepo"
+  env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" FM_ROOT_OVERRIDE="$root" \
     FM_SPAWN_NO_GUARD=1 FM_SECONDMATE_PERSIST_POLL=1 \
     FM_SECONDMATE_PERSIST_WAIT="${FM_TEST_PERSIST_WAIT:-30}" \
     FM_CONTROL_POLL=0.01 FM_CONTROL_EXIT_WAIT=0.05 FM_CONTROL_LAUNCH_WAIT=0.05 \
