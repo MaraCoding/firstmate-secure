@@ -229,8 +229,28 @@ EOF
   TASK_TMPS+=("/tmp/fm-$id")
 }
 
+# Secondmate cases historically used tiny unrelated git repos. Give those
+# fixtures the primary commit and its tracked scripts, without changing their
+# charter, child records, or deliberate non-bin local changes. Seed once so a
+# later version/drift assertion cannot be silently repaired by the fixture.
+seed_secondmate_code() { # <case-dir> <id>
+  local dir=$1 id=$2 meta="$1/home/state/$2.meta" wt commit
+  [ -f "$meta" ] && grep -q '^kind=secondmate$' "$meta" || return 0
+  wt=$(grep '^worktree=' "$meta" | cut -d= -f2-)
+  [ -d "$wt/bin" ] && [ ! -e "$dir/code-seeded" ] || return 0
+  # shellcheck source=bin/fm-ff-lib.sh
+  . "$ROOT/bin/fm-ff-lib.sh"
+  commit=$(primary_head_commit "$ROOT") || fail "fixture primary commit unavailable"
+  git -C "$wt" fetch -q --no-tags "$ROOT" "$commit" || fail "fixture import failed"
+  git -C "$wt" read-tree "$commit" || fail "fixture index failed"
+  git -C "$wt" update-ref HEAD "$commit" || fail "fixture HEAD failed"
+  git -C "$ROOT" archive "$commit" bin .gitignore | tar -xf - -C "$wt"
+  : > "$dir/code-seeded"
+}
+
 run_control() {  # <case-dir> <args...>
   local dir=$1; shift
+  seed_secondmate_code "$dir" "$1"
   # A claude spawn pre-registers workspace trust in the launching user's own
   # store (bin/fm-claude-trust.sh), and a relaunch reaches it through fm-control.sh, so this runs against a throwaway HOME;
   # without it this suite would write the developer's real ~/.claude.json.
@@ -1244,7 +1264,7 @@ test_secondmate_claude_relaunch_keeps_local_settings() {
   dir=$(new_case smlocal sml)
   home="$dir/home"
   mkdir -p "$home/config" "$home/data/sml"
-  printf 'codex\n' > "$home/config/secondmate-harness"
+  printf 'codex fixture-model\n' > "$home/config/secondmate-harness"
   printf '# secondmate brief\n' > "$home/data/sml/brief.md"
   fm_git_worktree "$dir/proj" "$dir/smhome" sm-local-branch
   mkdir -p "$dir/smhome/state" "$dir/smhome/data" "$dir/smhome/bin" "$dir/smhome/.claude"
@@ -1511,8 +1531,12 @@ test_explicit_secondmate_harness_ignores_configured_profile_axes() {
   printf '%s' "$dir/smhome" > "$dir/fake/cwd"
   printf 'codex' > "$dir/fake/becomes"
   out=$(run_control "$dir" sm4 relaunch --harness codex); rc=$?
-  expect_code 0 "$rc" "an explicit secondmate harness should relaunch"$'\n'"$out"
-  [ "$(meta_field "$dir" sm4 model)" = default ] \
+  expect_code 1 "$rc" "a non-Claude secondmate requires an explicit model"
+  assert_contains "$out" 'requires an explicit model' "missing-model refusal should explain the fix"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "missing-model refusal stopped the agent"
+  out=$(run_control "$dir" sm4 relaunch --harness codex --model explicit-model); rc=$?
+  expect_code 0 "$rc" "an explicit secondmate profile should relaunch"$'\n'"$out"
+  [ "$(meta_field "$dir" sm4 model)" = explicit-model ] \
     || fail "an explicit secondmate harness must not inherit the configured model"
   [ "$(meta_field "$dir" sm4 effort)" = default ] \
     || fail "an explicit secondmate harness must not inherit the configured effort"
@@ -1979,6 +2003,24 @@ test_secondmate_relaunch_checkpoints_child_work_and_spares_the_charter() {
   assert_present "$dir/smhome/state/c1.meta" "child records must survive the relaunch"
   assert_present "$dir/smhome/state/c2.meta" "child records must survive the relaunch"
   pass "fm-control relaunch: a secondmate's child work is accounted for and its charter is left alone"
+  local before primary lag
+  before=$(wc -c < "$dir/fake/literal")
+  printf '\n# fixture drift\n' >> "$dir/smhome/bin/fm-harness.sh"
+  out=$(run_control "$dir" sm1 relaunch); rc=$?
+  [ "$rc" -ne 0 ] || fail "relaunch accepted tracked bin drift"
+  assert_contains "$out" 'tracked bin/ differs' "relaunch did not diagnose script drift"
+  [ "$(wc -c < "$dir/fake/literal")" = "$before" ] || fail "drift refusal stopped the running agent"
+  git -C "$dir/smhome" show HEAD:bin/fm-harness.sh > "$dir/smhome/bin/fm-harness.sh"
+  primary=$(git -C "$dir/smhome" rev-parse HEAD)
+  git -C "$dir/smhome" -c user.name=Fixture -c user.email=fixture.invalid commit --allow-empty -qm 'fixture lag' \
+    || fail "could not create the different-commit fixture"
+  lag=$(git -C "$dir/smhome" rev-parse HEAD)
+  out=$(run_control "$dir" sm1 relaunch); rc=$?
+  [ "$rc" -ne 0 ] || fail "relaunch accepted a different home commit"
+  assert_contains "$out" "$primary" "version refusal omitted primary commit"
+  assert_contains "$out" "$lag" "version refusal omitted home commit"
+  [ "$(wc -c < "$dir/fake/literal")" = "$before" ] || fail "version refusal stopped the running agent"
+  pass "local secondmate relaunch refuses version/bin drift before stopping the agent"
 }
 
 test_secondmate_relaunch_refuses_an_unmarked_home() {

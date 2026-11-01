@@ -129,7 +129,7 @@ git -C "$PARENT/projects/alpha" push -q -u origin main
 cat > "$PARENT/data/projects.md" <<EOF
 - alpha [direct-PR] - alpha project (added 2026-08-02)
 EOF
-printf 'codex\n' > "$PARENT/config/secondmate-harness"
+printf 'codex fixture-model\n' > "$PARENT/config/secondmate-harness"
 printf 'tmux\n' > "$PARENT/config/backend"
 printf 'primary harness defaults\n' > "$PARENT/config/crew-harness"
 
@@ -216,7 +216,7 @@ if [ "${FM_FAKE_SSH_MODE:-normal}" = doctor-fixable ] \
 fi
 case "${FM_FAKE_SSH_MODE:-normal}:$command_name:$command_rel" in
   launch-nonherdr-route:fm-remote-secondmate-control.sh:*)
-    [ "$_command_action" = launch ] || exit 93
+    [ "$_command_action" = launch ] || exec "$FM_FAKE_REMOTE_ENTRYPOINT" "$@"
     printf 'schema=fm-remote-secondmate-control.v1\n'
     printf 'backend=tmux\n'
     printf 'target=firstmate:fm-ios\n'
@@ -224,7 +224,7 @@ case "${FM_FAKE_SSH_MODE:-normal}:$command_name:$command_rel" in
     exit 0
     ;;
   launch-default-session-route:fm-remote-secondmate-control.sh:*)
-    [ "$_command_action" = launch ] || exit 93
+    [ "$_command_action" = launch ] || exec "$FM_FAKE_REMOTE_ENTRYPOINT" "$@"
     printf 'schema=fm-remote-secondmate-control.v1\n'
     printf 'backend=herdr\n'
     printf 'target=default:w1:p2\n'
@@ -238,7 +238,7 @@ case "${FM_FAKE_SSH_MODE:-normal}:$command_name:$command_rel" in
     exit 1
     ;;
   launch-block:fm-remote-secondmate-control.sh:*)
-    [ "$_command_action" = launch ] || exit 93
+    [ "$_command_action" = launch ] || exec "$FM_FAKE_REMOTE_ENTRYPOINT" "$@"
     touch "$FM_FAKE_LAUNCH_ENTERED"
     while [ ! -f "$FM_FAKE_LAUNCH_RELEASE" ]; do sleep 0.02; done
     ;;
@@ -963,7 +963,7 @@ EOF
 cp "$remote_route_meta" "$TMP_ROOT/remote-ios-legacy-before-refusal.meta"
 printf 'fm-ios|%s\n' "$REMOTE_HOME" > "$TMUX_STATE"
 set +e
-remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh launch ios codex - - herdr \
+remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh launch ios codex fixture-model - herdr \
   > "$TMP_ROOT/legacy-alive-refusal.out" 2>&1
 legacy_alive_rc=$?
 set -e
@@ -992,11 +992,12 @@ FM_FAKE_SSH_MODE=inherit-block remote_env "$ROOT/bin/fm-spawn.sh" ios --secondma
 spawn_concurrent=$!
 spawn_inherit_wait=0
 # Earlier inherited files traverse the worker before captain-shared.md, so give
-# a loaded portable runner 30 seconds to reach this deliberately blocked write.
+# a loaded portable runner 120 seconds, including the prelaunch code proof,
+# to reach this deliberately blocked write.
 while [ ! -f "$TMP_ROOT/inherit.entered" ]; do
   kill -0 "$spawn_concurrent" 2>/dev/null || fail "remote spawn exited before its blocked inheritance write"
   spawn_inherit_wait=$((spawn_inherit_wait + 1))
-  [ "$spawn_inherit_wait" -le 1500 ] || fail "remote spawn never reached its blocked inheritance write"
+  [ "$spawn_inherit_wait" -le 6000 ] || fail "remote spawn never reached its blocked inheritance write"$'\n'"$(cat "$TMP_ROOT/spawn-concurrent.out")"
   sleep 0.02
 done
 cat > "$PARENT/data/captain-shared.md" <<'EOF'
@@ -1107,7 +1108,7 @@ while [ ! -f "$TMP_ROOT/inherit.entered" ]; do
   inherit_wait=$((inherit_wait + 1))
   # Match the earlier spawn/inheritance wait: a loaded portable runner can
   # spend several seconds in the remote entrypoint before reaching this write.
-  [ "$inherit_wait" -le 1500 ] || fail "first inheritance transaction never reached its blocked write"
+  [ "$inherit_wait" -le 6000 ] || fail "first inheritance transaction never reached its blocked write"$'\n'"$(cat "$TMP_ROOT/config-concurrent-first.out")"
   sleep 0.02
 done
 cat > "$PARENT/data/captain-shared.md" <<'EOF'
@@ -1236,7 +1237,7 @@ pass "remote update imports and fast-forwards the persistent home on its configu
 # capability tables, and they leave the live agent exactly as it was - which is
 # the whole safety property of asking before anything is stopped.
 RELAUNCH_UNVERIFIED=$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh \
-  relaunch ios notaharness - - 2>&1) && fail "an unverified runtime should refuse a remote restart"
+  relaunch ios notaharness fixture-model - 2>&1) && fail "an unverified runtime should refuse a remote restart"
 assert_contains "$RELAUNCH_UNVERIFIED" 'unverified remote secondmate harness' \
   "the remote restart verb did not refuse an unverified runtime"
 RELAUNCH_ROUTE_META="$REMOTE_HOME/state/parent-route/ios.meta"
@@ -1245,7 +1246,7 @@ mkdir -p "$TMP_ROOT/not-a-checkout"
 sed "s|^worktree=.*|worktree=$TMP_ROOT/not-a-checkout|" \
   "$TMP_ROOT/ios-before-relaunch.meta" > "$RELAUNCH_ROUTE_META"
 RELAUNCH_CHECKPOINT=$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh \
-  relaunch ios codex - - 2>&1) && fail "a restart with no accountable checkout should refuse"
+  relaunch ios codex fixture-model - 2>&1) && fail "a restart with no accountable checkout should refuse"
 assert_contains "$RELAUNCH_CHECKPOINT" 'refusing to relaunch without a checkout whose unlanded work can be accounted for' \
   "the host-local restart did not reach the control plane's own pre-stop checkpoint"
 cp "$TMP_ROOT/ios-before-relaunch.meta" "$RELAUNCH_ROUTE_META"
@@ -1310,7 +1311,7 @@ FM_STATE_OVERRIDE="$WATCH_STATE" FM_SECONDMATE_LIVENESS_SECS=1 FM_POLL=1 \
   > "$TMP_ROOT/watch-liveness.out" 2> "$TMP_ROOT/watch-liveness.err" &
 watch_pid=$!
 watch_wait=0
-while kill -0 "$watch_pid" 2>/dev/null && [ "$watch_wait" -lt 1500 ]; do
+while kill -0 "$watch_pid" 2>/dev/null && [ "$watch_wait" -lt 6000 ]; do
   sleep 0.02
   watch_wait=$((watch_wait + 1))
 done
@@ -1580,11 +1581,11 @@ FM_FAKE_SSH_MODE=launch-block remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmat
 spawn_retirement_pid=$!
 launch_wait=0
 # The respawn performs readiness and inheritance jobs before launch, so allow
-# the same 30-second loaded-runner bound as the earlier blocked worker path.
+# the same 120-second loaded-runner bound as the earlier blocked worker path.
 while [ ! -f "$TMP_ROOT/launch.entered" ]; do
   kill -0 "$spawn_retirement_pid" 2>/dev/null || fail "remote respawn exited before its blocked launch"
   launch_wait=$((launch_wait + 1))
-  [ "$launch_wait" -le 1500 ] || fail "remote respawn never reached its blocked launch"
+  [ "$launch_wait" -le 6000 ] || fail "remote respawn never reached its blocked launch"
   sleep 0.02
 done
 # Opt-in archival must cover the parent-side status on the real remote path.

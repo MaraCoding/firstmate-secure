@@ -1197,4 +1197,22 @@ expect_code 2 "$code" "a zero classifier timeout exits 2"
 pass "local classifier configuration errors exit 2; a missing CLI is an error outcome"
 reset_local
 
+# The committed tier list is installable data, not just a documentation sample.
+DEFAULT_HOME="$TMP_ROOT/committed-defaults"
+mkdir -p "$DEFAULT_HOME/config" "$DEFAULT_HOME/data" "$DEFAULT_HOME/state" "$DEFAULT_HOME/projects"
+cp "$ROOT/config-defaults/crew-dispatch.json" "$DEFAULT_HOME/config/crew-dispatch.json"
+DEFAULT_OUT=$(FM_HOME="$DEFAULT_HOME" FM_ROOT_OVERRIDE="$ROOT" \
+  FM_BOOTSTRAP_DETECT_ONLY=1 FM_BOOTSTRAP_NETWORK=skip \
+  FM_DISPATCH_CLASSIFIER='claude fixture-model' \
+  bash "$ROOT/bin/fm-bootstrap.sh" 2>&1)
+assert_not_contains "$DEFAULT_OUT" 'CREW_DISPATCH: invalid' "bootstrap rejected the committed tier list"
+# shellcheck source=bin/fm-config-inherit-lib.sh
+. "$ROOT/bin/fm-config-inherit-lib.sh"
+mkdir -p "$TMP_ROOT/inherited-defaults/config"
+FM_INHERITABLE_CONFIG=crew-dispatch.json propagate_inheritable_config \
+  "$DEFAULT_HOME/config" "$TMP_ROOT/inherited-defaults/config" || fail "committed tier list could not be inherited"
+cmp -s "$ROOT/config-defaults/crew-dispatch.json" "$TMP_ROOT/inherited-defaults/config/crew-dispatch.json" \
+  || fail "inherited committed tier list changed bytes"
+pass "committed dispatch defaults pass bootstrap's typed validator and inherit byte-for-byte"
+
 printf '# all fm-dispatch-resolve tests passed\n'

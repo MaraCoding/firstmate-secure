@@ -278,8 +278,8 @@
 #   whitespace-separated tokens ("<harness> [<model>] [<effort>]"). For a
 #   --secondmate spawn, those tokens apply only when this spawn also resolves its
 #   harness from config/secondmate-harness. An explicit per-spawn --harness,
-#   positional harness arg, or raw launch command starts with clean model/effort
-#   defaults unless the caller also passes explicit --model/--effort flags. When
+#   positional harness arg starts with clean effort and the committed secondmate
+#   model default (fm-harness.sh); raw secondmate launch commands are refused. When
 #   the file governs the spawn, its model/effort tokens are re-resolved on every
 #   respawn exactly like the harness axis, and explicit --model/--effort flags
 #   still win over the file's tokens.
@@ -293,7 +293,9 @@
 #   provisioned firstmate home; the default is kind=ship.
 #   Before a secondmate launch, the home is fast-forwarded to the primary's
 #   default-branch commit when safe: directly for a local home, or through the
-#   configured host for a remote home. Skipped syncs warn and launch unchanged.
+#   configured host for a remote home. Remote launches and local relaunches
+#   refuse a lagging commit or modified tracked bin/; remote launches also
+#   verify that host's code root. Fresh local spawns warn on skipped syncs.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from both the spawning project and its repository's
 #   primary checkout, including when the spawning project is a linked worktree.
@@ -1192,6 +1194,11 @@ spawn_remote_secondmate() {
       [ -n "$effort" ] || effort=-
     fi
   fi
+  model=$("$SCRIPT_DIR/fm-harness.sh" secondmate-launch-model "$harness" "$model") || {
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    return 1
+  }
   # A remote second mate always runs on Herdr: its server belongs to the host's
   # own GUI login session, so the endpoint outlives every SSH connection that
   # supervises it. bin/fm-remote-doctor.sh gates that host on the same
@@ -1237,7 +1244,7 @@ spawn_remote_secondmate() {
   # through a launch. This is also the readiness gate every liveness relaunch
   # passes through, because recovery respawns through this same route.
   rc=0
-  fm_remote_readiness_ensure "$SCRIPT_DIR" "$id" || rc=$?
+  fm_remote_readiness_ensure "$SCRIPT_DIR" "$id" "$harness" "$model" || rc=$?
   if [ "$rc" -ne 0 ]; then
     fm_lock_release "$registry_lock" || true
     fm_lock_release "$SPAWN_TASK_LOCK" || true
@@ -1253,20 +1260,23 @@ spawn_remote_secondmate() {
     [ "$rc" -ne 255 ] || return 255
     return 1
   fi
-  # Pre-launch sync, the remote twin of the local-HEAD sync below: this home
-  # follows THIS primary's default-branch commit, not the Firstmate copy on that
-  # host, so the commit is resolved here and handed over for the host to import
-  # and fast-forward to. A skipped sync warns and launches the home unchanged.
-  if sm_primary_head=$(primary_head_commit "$FM_ROOT"); then
-    if sync_out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh sync "$id" \
-      "$sm_primary_head" </dev/null 2>&1); then
-      :
-    else
-      sync_rc=$?
-      echo "warning: remote secondmate $id sync skipped before launch: $(remote_sync_failure_reason "$sync_rc" "$sync_out")" >&2
-    fi
+  # The host verifies its code root, syncs the home through ff_target, and
+  # proves both tracked bin trees before any launch or inheritance transfer.
+  if ! sm_primary_head=$(primary_head_commit "$FM_ROOT"); then
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    echo "error: remote secondmate $id launch refused: primary default-branch commit cannot be resolved" >&2
+    return 1
+  fi
+  if sync_out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh prepare-launch "$id" \
+    "$sm_primary_head" </dev/null 2>&1); then
+    :
   else
-    echo "warning: remote secondmate $id sync skipped before launch: primary default-branch commit cannot be resolved" >&2
+    sync_rc=$?
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    echo "error: remote secondmate $id launch refused: $(remote_sync_failure_reason "$sync_rc" "$sync_out")" >&2
+    return "$sync_rc"
   fi
   remote_lock=$(fm_remote_inherit_transaction_lock_path "$STATE" "$id")
   if ! fm_lock_acquire_wait "$remote_lock"; then
@@ -1303,13 +1313,12 @@ spawn_remote_secondmate() {
   # relaunch, freshly rooted otherwise, never adopting this process's ambient
   # TRACEPARENT) under this home's frozen decision, then handed to the remote
   # host to export into the agent's pane. Disabled resolves to empty and the
-  # remote launch call stays byte-identical to the untraced one.
+  # remote launch carries an empty trace slot before its expected commit.
   remote_traceparent=
   if [ "$(fm_trace_context_session_effective "$STATE/.trace-context-effective")" = on ]; then
     remote_traceparent=$(FM_TRACE_CONTEXT=on fm_trace_context_resolve "$CONFIG" "$meta" || true)
   fi
-  launch_args=("$id" "$harness" "$model" "$effort" "$backend")
-  [ -z "$remote_traceparent" ] || launch_args+=("$remote_traceparent")
+  launch_args=("$id" "$harness" "$model" "$effort" "$backend" "$remote_traceparent" "$sm_primary_head")
   if out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh launch \
     "${launch_args[@]}" </dev/null 2>&1); then
     rc=0
@@ -2864,6 +2873,13 @@ if [ "$KIND" = secondmate ] && [ -z "$ARG3" ]; then
     fi
   fi
 fi
+if [ "$KIND" = secondmate ]; then
+  [ "$RAW_LAUNCH" = 0 ] || {
+    echo "error: secondmate launches require a verified harness and explicit model, not a raw command" >&2
+    exit 1
+  }
+  MODEL=$("$SCRIPT_DIR/fm-harness.sh" secondmate-launch-model "$HARNESS" "$MODEL") || exit 1
+fi
 # Ultra is an explicit native capability, never a Pi thinking-level alias.
 # Validate the fully resolved profile before worktree or endpoint provisioning.
 if [ "$EFFORT" = ultra ]; then
@@ -3479,10 +3495,10 @@ if [ "$KIND" = secondmate ]; then
   # PRIMARY checkout's current default-branch commit, so a freshly spawned or
   # recovery-respawned secondmate always runs the primary's version (AGENTS.md
   # spawn section). Purely local - no fetch: the home is a worktree of this same
-# repo and already holds the commit. The same guarded path can reconcile a clean
-# divergence already present at the target; a dirty, uniquely diverged, or
-# wrong-branch home is left untouched and launches as-is. The agent re-reads
-  # AGENTS.md fresh on launch, so no nudge is needed here.
+  # repo and already holds the commit. The same guarded path can reconcile a clean
+  # divergence already present at the target; relaunch refuses any remaining lag.
+  # A fresh local launch retains the warning-only sync policy.
+  # The agent re-reads AGENTS.md fresh on launch, so no nudge is needed here.
   # On a remote host this spawn is the host-local leg of a launch whose parent has
   # already synced the home to ITS primary commit, and $FM_ROOT here is only that
   # host's own Firstmate copy; syncing again would target the wrong checkout, so
@@ -3499,8 +3515,12 @@ if [ "$KIND" = secondmate ]; then
       echo "warning: secondmate $ID sync skipped before launch: $sm_ff_reason" >&2
       ;;
     esac
+    if [ "$RELAUNCH" -eq 1 ]; then
+      require_secondmate_launch_freshness "$PROJ_ABS" "$sm_primary_head" || exit 1
+    fi
   else
     echo "warning: secondmate $ID sync skipped before launch: primary default-branch commit cannot be resolved" >&2
+    [ "$RELAUNCH" -eq 0 ] || exit 1
   fi
   mkdir -p "$PROJ_ABS/state" || {
     echo "error: could not create secondmate state directory for $PROJ_ABS" >&2

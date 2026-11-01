@@ -992,6 +992,9 @@ resolve_relaunch_profile() {
   else
     TARGET_EFFORT=default
   fi
+  if [ "$KIND" = secondmate ]; then
+    TARGET_MODEL=$("$SCRIPT_DIR/fm-harness.sh" secondmate-launch-model "$TARGET_HARNESS" "$TARGET_MODEL") || return 1
+  fi
   if [ "$TARGET_EFFORT" = ultra ]; then
     "$SCRIPT_DIR/fm-harness.sh" validate-native-effort "$TARGET_HARNESS" "$TARGET_MODEL" "$TARGET_EFFORT" || return 1
   fi
@@ -1088,6 +1091,16 @@ safe_checkpoint() {
       children=$((children + 1))
     done
     CHECKPOINT_LINES+=("children=$children")
+    # Refuse before stopping a live agent if the home has not converged.
+    # shellcheck source=bin/fm-ff-lib.sh
+    . "$SCRIPT_DIR/fm-ff-lib.sh"
+    local launch_commit
+    if [ "${FM_SKIP_SECONDMATE_SYNC:-0}" = 1 ]; then
+      launch_commit=$(git -C "$FM_ROOT" rev-parse HEAD) || return 1
+    else
+      launch_commit=$(primary_head_commit "$FM_ROOT") || die "primary default-branch commit cannot be resolved"
+    fi
+    require_secondmate_launch_freshness "$WT" "$launch_commit" || return 1
   fi
 }
 

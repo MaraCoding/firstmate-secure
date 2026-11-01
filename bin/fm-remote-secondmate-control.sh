@@ -2,8 +2,10 @@
 # Host-local lifecycle control for the remote secondmate home selected by fm-on.
 #
 # Usage:
-#   fm-remote-secondmate-control.sh launch <id> <harness> <model|-> <effort|-> herdr [traceparent]
-#   fm-remote-secondmate-control.sh relaunch <id> <harness> <model|default|-> <effort|default|->
+#   fm-remote-secondmate-control.sh launch <id> <harness> <model|-> <effort|-> herdr [traceparent] [parent-commit]
+#   fm-remote-secondmate-control.sh relaunch <id> <harness> <model|default|-> <effort|default|-> [parent-commit]
+# Parent launchers carry the prepare-launch commit to the lifecycle boundary;
+# an omitted commit is the host-local compatibility path targeting code-root HEAD.
 #   fm-remote-secondmate-control.sh state <id>
 #   fm-remote-secondmate-control.sh route <id>
 #   fm-remote-secondmate-control.sh send <id> <message> [fire-and-forget]
@@ -11,6 +13,8 @@
 #   fm-remote-secondmate-control.sh capture <id> [lines]
 #   fm-remote-secondmate-control.sh observe <id>
 #   fm-remote-secondmate-control.sh sync <id> [<parent-commit>]
+#   fm-remote-secondmate-control.sh prepare-launch <id> <parent-commit>
+#     Refuse a stale/modified code root, guarded-sync the home, verify its bin/.
 #   fm-remote-secondmate-control.sh update <id>
 #   fm-remote-secondmate-control.sh retire <id> [--force]
 #
@@ -175,6 +179,8 @@ cmd_launch() {
 
   validate_id "$id"
   validate_home "$id"
+  require_launch_copies "${7:-}"
+  model=$("$SCRIPT_DIR/fm-harness.sh" secondmate-launch-model "$harness" "$model") || return 1
   case "$harness" in
     claude|codex|opencode|pi|pi-signed|grok|kimi|cursor) ;;
     *) die "unverified remote secondmate harness: $harness" ;;
@@ -247,6 +253,8 @@ cmd_relaunch() {
 
   validate_id "$id"
   validate_home "$id"
+  require_launch_copies "${5:-}"
+  model=$("$SCRIPT_DIR/fm-harness.sh" secondmate-launch-model "$harness" "$model") || return 1
   case "$harness" in
     claude|codex|opencode|pi|pi-signed|grok|kimi|cursor) ;;
     *) die "unverified remote secondmate harness: $harness" ;;
@@ -399,6 +407,35 @@ cmd_sync() {
   esac
 }
 
+# The parent must run prepare-launch with its own commit before dispatch.
+# Repeat the local proof at the actual host-local lifecycle boundary too.
+require_launch_copies() {
+  local commit=${1:-}
+  if [ -z "$commit" ]; then
+    commit=$(git -C "$FM_ROOT" rev-parse HEAD) || die "remote code root HEAD is unreadable"
+  fi
+  case "$commit" in *[!0-9a-f]*) die "launch target must be a full 40-character commit id" ;; esac
+  [ "${#commit}" -eq 40 ] || die "launch target must be a full 40-character commit id"
+  require_secondmate_launch_freshness "$FM_ROOT" "$commit" || return 1
+  require_secondmate_launch_freshness "$TARGET_HOME" "$commit"
+}
+
+cmd_prepare_launch() { # <id> <parent-commit>
+  local id=$1 commit=$2 out actual
+  validate_id "$id"
+  validate_home "$id"
+  case "$commit" in ''|*[!0-9a-f]*) die "launch target must be a full 40-character commit id" ;; esac
+  [ "${#commit}" -eq 40 ] || die "launch target must be a full 40-character commit id"
+  require_secondmate_launch_freshness "$FM_ROOT" "$commit" || return 1
+  if out=$(cmd_sync "$id" "$commit" 2>&1); then
+    printf '%s\n' "$out"
+  else
+    actual=$(git -C "$TARGET_HOME" rev-parse HEAD 2>/dev/null || printf unreadable)
+    die "secondmate launch refused: home commit=$actual primary=$commit; $(first_line "$out")"
+  fi
+  require_secondmate_launch_freshness "$TARGET_HOME" "$commit"
+}
+
 cmd_update() {
   local id=$1 update_out root_status
   validate_id "$id"
@@ -441,8 +478,8 @@ cmd_retire() {
 }
 
 case "${1:-}" in
-  launch) shift; [ "$#" -ge 5 ] && [ "$#" -le 6 ] || usage; cmd_launch "$@" ;;
-  relaunch) shift; [ "$#" -eq 4 ] || usage; cmd_relaunch "$@" ;;
+  launch) shift; [ "$#" -ge 5 ] && [ "$#" -le 7 ] || usage; cmd_launch "$@" ;;
+  relaunch) shift; [ "$#" -ge 4 ] && [ "$#" -le 5 ] || usage; cmd_relaunch "$@" ;;
   state) shift; [ "$#" -eq 1 ] || usage; validate_id "$1"; validate_home "$1"; state_value "$1" ;;
   route) shift; [ "$#" -eq 1 ] || usage; cmd_route "$1" ;;
   send) shift; [ "$#" -ge 2 ] && [ "$#" -le 3 ] || usage; cmd_send "$@" ;;
@@ -450,6 +487,7 @@ case "${1:-}" in
   capture) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; cmd_capture "$@" ;;
   observe) shift; [ "$#" -eq 1 ] || usage; cmd_observe "$@" ;;
   sync) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; cmd_sync "$@" ;;
+  prepare-launch) shift; [ "$#" -eq 2 ] || usage; cmd_prepare_launch "$@" ;;
   update) shift; [ "$#" -eq 1 ] || usage; cmd_update "$@" ;;
   retire) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; cmd_retire "$@" ;;
   ''|-h|--help|help) usage ;;

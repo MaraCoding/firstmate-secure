@@ -973,7 +973,15 @@ fm_remote_job_worker_lock_path() { printf '%s\n' "$FM_REMOTE_JOB_STATE/worker.lo
 # verify under another, or the checker declares the live owner dead and a
 # second worker splits the queue.
 fm_remote_job_process_start() {
-  local pid=$1 ps_bin value
+  local pid=$1 ps_bin value stat
+  # Linux: procps lstart is derived from a wall-clock boot time that WSL2 steps
+  # on clock sync, so use the immutable /proc starttime (clock ticks since boot).
+  if [ -r "/proc/$pid/stat" ] && stat=$(cat "/proc/$pid/stat" 2>/dev/null) && [ -n "$stat" ]; then
+    stat=${stat##*) }
+    # shellcheck disable=SC2086 # deliberate splitting of the remaining proc fields
+    set -- $stat
+    case "${20:-}" in ''|*[!0-9]*) ;; *) printf 'ticks:%s\n' "${20}"; return 0 ;; esac
+  fi
   if [ -x /bin/ps ]; then ps_bin=/bin/ps; elif [ -x /usr/bin/ps ]; then ps_bin=/usr/bin/ps; else return 1; fi
   value=$(LC_ALL=C "$ps_bin" -p "$pid" -o lstart= 2>/dev/null) || return 1
   [ -n "$value" ] || return 1

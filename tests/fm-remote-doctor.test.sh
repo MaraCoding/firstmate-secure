@@ -299,7 +299,7 @@ SH
 doctor() {
   set +e
   DOCTOR_OUT=$(
-    HOME="$CASE_HOME" \
+    HOME="$CASE_HOME" CLAUDE_CONFIG_DIR='' \
     FM_HOME="$CASE_PROJECT_HOME" \
     PATH="$CASE_HOME/.local/bin:$CASE_BIN:$BASE_PATH" \
     FM_FAKE_STATE="$CASE_STATE" \
@@ -779,6 +779,21 @@ assert_contains "$DOCTOR_OUT" 'check herdr-server=ok:' "the started server was n
 [ ! -s "$CASE_LAUNCHCTL_LOG" ] || fail "the linux path invoked launchctl"
 pass "a non-darwin host skips launch agents and starts its herdr server directly"
 
+mkdir -p "$CASE_HOME/.claude"
+printf '{"model":"fable"}\n' > "$CASE_HOME/.claude/settings.json"
+doctor
+expect_code 0 "$DOCTOR_RC" "a user-model mismatch is advisory when launch pins its model"
+assert_contains "$DOCTOR_OUT" 'user model=fable differs from resolved secondmate model=claude-opus-5-5' "doctor did not report model drift"
+assert_contains "$DOCTOR_OUT" 'action: secondmate-model:' "model drift had no actionable line"
+doctor --claude-model custom-parent-model --fix
+expect_code 0 "$DOCTOR_RC" "an explicit parent model should not block host readiness"
+assert_contains "$DOCTOR_OUT" 'resolved secondmate model=custom-parent-model' "doctor ignored the parent-resolved pin"
+[ "$(cat "$CASE_HOME/.claude/settings.json")" = '{"model":"fable"}' ] || fail "doctor changed user model settings"
+printf '{"model":"custom-parent-model"}\n' > "$CASE_HOME/.claude/settings.json"
+doctor --claude-model custom-parent-model
+assert_contains "$DOCTOR_OUT" 'check secondmate-model=ok:' "matching user and resolved model was not recognized"
+pass "doctor reports user-model drift against the committed default or parent pin without changing user settings"
+
 # --- --fix may add only owned wrappers for version-manager tools -------------
 
 new_case Linux with-herdr no-gui
@@ -830,6 +845,8 @@ mkdir -p "$CASE_HOME/.local/bin"
 for tool in herdr tasks-axi treehouse claude; do
   ln -s "$CASE_BIN/$tool" "$CASE_HOME/.local/bin/$tool"
 done
+# The job worker uses its composed runtime PATH, not this suite's tools dir.
+ln -s "$(command -v jq)" "$CASE_HOME/.local/bin/jq"
 HOME="$CASE_HOME" FM_ROOT_OVERRIDE="$ROOT" FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux \
   "$ROOT/bin/fm-remote-job-worker.sh" > "$CASE_STATE/worker.out" 2> "$CASE_STATE/worker.err" &
 DOCTOR_WORKER_PID=$!
@@ -846,7 +863,7 @@ assert_contains "$DOCTOR_OUT" 'check remote-job-worker=fixable: the running remo
 assert_contains "$DOCTOR_OUT" 'check remote-job-probe=fixable: the remote job worker identity is stale' \
   "doctor probed through stale worker code"
 doctor --fix
-expect_code 0 "$DOCTOR_RC" "--fix did not replace the stale worker identity"
+expect_code 0 "$DOCTOR_RC" "--fix did not replace the stale worker identity"$'\n'"$DOCTOR_OUT"
 assert_contains "$DOCTOR_OUT" 'fix remote-job-worker=applied:' "--fix did not report refreshing the stale worker"
 assert_contains "$DOCTOR_OUT" 'check remote-job-worker=ok:' "the refreshed worker was not confirmed ready"
 assert_contains "$DOCTOR_OUT" 'check remote-job-probe=ok: the remote job worker completed the required-tool probe' \

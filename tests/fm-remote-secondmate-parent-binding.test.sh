@@ -141,7 +141,7 @@ git -C "$PARENT/projects/alpha" remote add origin "file://$TMP_ROOT/alpha.git"
 git -C "$PARENT/projects/alpha" push -q -u origin main
 git --git-dir="$TMP_ROOT/alpha.git" symbolic-ref HEAD refs/heads/main
 printf -- '- alpha [direct-PR] - alpha project (added 2026-08-04)\n' > "$PARENT/data/projects.md"
-printf 'codex\n' > "$PARENT/config/secondmate-harness"
+printf 'codex fixture-model\n' > "$PARENT/config/secondmate-harness"
 printf 'tmux\n' > "$PARENT/config/backend"
 
 # The primary home is the X-mode / relay home: the captain's real activation.

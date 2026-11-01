@@ -154,6 +154,16 @@ add_local_mate() {
   local dir=$1 id=$2 harness=${3:-claude} backend=${4:-}
   local home="$dir/home" smhome="$dir/$id-home"
   fm_git_worktree "$dir/$id-repo" "$smhome" "sm-$id"
+  # A local relaunch now proves the primary commit and tracked scripts before
+  # stopping the agent. Materialize those facts in this otherwise tiny fixture.
+  # shellcheck source=bin/fm-ff-lib.sh
+  . "$ROOT/bin/fm-ff-lib.sh"
+  local commit
+  commit=$(primary_head_commit "$ROOT") || fail "fixture primary commit unavailable"
+  git -C "$smhome" fetch -q --no-tags "$ROOT" "$commit" || fail "fixture import failed"
+  git -C "$smhome" read-tree "$commit" || fail "fixture index failed"
+  git -C "$smhome" update-ref HEAD "$commit" || fail "fixture HEAD failed"
+  git -C "$ROOT" archive "$commit" bin .gitignore | tar -xf - -C "$smhome"
   mkdir -p "$smhome/state" "$smhome/data" "$smhome/bin" "$home/data/$id"
   printf '%s\n' "$id" > "$smhome/.fm-secondmate-home"
   printf '# agents\n' > "$smhome/AGENTS.md"
@@ -189,6 +199,7 @@ add_repo_backed_mate() {  # <case-dir> <id> [harness] [backend]
     git -C "$dir/origin.git" symbolic-ref HEAD refs/heads/main
     git clone -q "$dir/origin.git" "$dir/seed" 2>/dev/null
     mkdir -p "$dir/seed/bin" "$dir/seed/.agents/skills"
+    cp -R "$ROOT/bin/." "$dir/seed/bin/"
     printf '# agents\n' > "$dir/seed/AGENTS.md"
     printf 'echo a\n' > "$dir/seed/bin/tool.sh"
     printf 's1\n' > "$dir/seed/.agents/skills/note.md"
@@ -242,8 +253,9 @@ arm_answer() {
 }
 
 run_restart() {  # <case-dir> <args...>
-  local dir=$1; shift
-  env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
+  local dir=$1 root=$ROOT; shift
+  [ ! -d "$dir/fmrepo" ] || root="$dir/fmrepo"
+  env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" FM_ROOT_OVERRIDE="$root" \
     FM_SPAWN_NO_GUARD=1 FM_SECONDMATE_PERSIST_POLL=1 \
     FM_SECONDMATE_PERSIST_WAIT="${FM_TEST_PERSIST_WAIT:-30}" \
     FM_CONTROL_POLL=0.01 FM_CONTROL_EXIT_WAIT=0.05 FM_CONTROL_LAUNCH_WAIT=0.05 \
@@ -522,8 +534,8 @@ test_remote_mate_restarts_over_the_transport_hop() {
     "a remote restart should be reported with its host and the parent's pinned runtime"
   relaunch_line=$(grep '^fm-remote-secondmate-control.sh relaunch' "$dir/ssh.log" | head -1)
   [ -n "$relaunch_line" ] || fail "no relaunch crossed the transport hop"$'\n'"$(cat "$dir/ssh.log")"
-  [ "$relaunch_line" = "fm-remote-secondmate-control.sh relaunch sm2 codex big-model high" ] \
-    || fail "the host-local relaunch did not carry the parent's resolved profile: $relaunch_line"
+  [ "$relaunch_line" = "fm-remote-secondmate-control.sh relaunch sm2 codex big-model high $(primary_head_commit "$ROOT")" ] \
+    || fail "the host-local relaunch did not carry the parent's resolved profile and commit: $relaunch_line"
   # The persist request crossed the SAME hop before the restart did.
   [ "$(grep -n '^fm-remote-secondmate-control.sh send' "$dir/ssh.log" | head -1 | cut -d: -f1)" \
      -lt "$(grep -n '^fm-remote-secondmate-control.sh relaunch' "$dir/ssh.log" | head -1 | cut -d: -f1)" ] \
@@ -547,7 +559,7 @@ test_remote_restart_lands_on_the_per_mate_pin() {
 
   expect_code 0 "$rc" "a mate with its own override should restart onto it"$'\n'"$out"
   relaunch_line=$(grep '^fm-remote-secondmate-control.sh relaunch' "$dir/ssh.log" | head -1)
-  [ "$relaunch_line" = "fm-remote-secondmate-control.sh relaunch sm2 pi mate-model max" ] \
+  [ "$relaunch_line" = "fm-remote-secondmate-control.sh relaunch sm2 pi mate-model max $(primary_head_commit "$ROOT")" ] \
     || fail "the mate's own override did not reach the host relaunch: $relaunch_line\n$out"
   pass "T6a a remote mate with a per-mate override restarts onto that override, not the default pin"
 }
@@ -564,7 +576,7 @@ test_remote_restart_uses_the_default_for_an_unpinned_mate() {
 
   expect_code 0 "$rc" "a mate with no override should restart onto the default pin"$'\n'"$out"
   relaunch_line=$(grep '^fm-remote-secondmate-control.sh relaunch' "$dir/ssh.log" | head -1)
-  [ "$relaunch_line" = "fm-remote-secondmate-control.sh relaunch sm2 codex big-model high" ] \
+  [ "$relaunch_line" = "fm-remote-secondmate-control.sh relaunch sm2 codex big-model high $(primary_head_commit "$ROOT")" ] \
     || fail "an unpinned mate did not resolve the default pin: $relaunch_line\n$out"
   pass "T6b a remote mate with no override line still restarts onto the default pin"
 }
@@ -585,7 +597,7 @@ test_remote_restart_with_a_legacy_pin_file_uses_the_first_line() {
 
   expect_code 0 "$rc" "a legacy pin file must not refuse a restart"$'\n'"$out"
   relaunch_line=$(grep '^fm-remote-secondmate-control.sh relaunch' "$dir/ssh.log" | head -1)
-  [ "$relaunch_line" = "fm-remote-secondmate-control.sh relaunch sm2 codex big-model high" ] \
+  [ "$relaunch_line" = "fm-remote-secondmate-control.sh relaunch sm2 codex big-model high $(primary_head_commit "$ROOT")" ] \
     || fail "the restart did not use the first line of the legacy pin: $relaunch_line\n$out"
   pass "T6d a legacy pin file still restarts the mate onto its first line"
 }
@@ -631,7 +643,7 @@ test_local_restart_uses_the_home_pin_and_reports_what_ran() {
   dir=$(new_case pin)
   add_local_mate "$dir" sm1
   arm_answer "$dir" sm1
-  printf 'codex\n' > "$dir/home/config/secondmate-harness"
+  printf 'codex fixture-model\n' > "$dir/home/config/secondmate-harness"
   printf 'codex' > "$dir/fake/becomes"
 
   out=$(run_restart "$dir" sm1); rc=$?
@@ -667,7 +679,7 @@ test_native_ultra_restart_keeps_local_and_remote_profiles() {
   unset FM_FAKE_ANSWER_STATUS
   expect_code 0 "$rc" "native remote restart failed: $out"
   relaunch_line=$(grep '^fm-remote-secondmate-control.sh relaunch' "$dir/ssh.log" | head -1)
-  [ "$relaunch_line" = "fm-remote-secondmate-control.sh relaunch sm2 pi-signed codex-native/gpt-6-astra ultra" ] \
+  [ "$relaunch_line" = "fm-remote-secondmate-control.sh relaunch sm2 pi-signed codex-native/gpt-6-astra ultra $(primary_head_commit "$ROOT")" ] \
     || fail "remote restart dropped native profile: $relaunch_line"
   pass "native Ultra survives local restart and the remote restart transport"
 }
@@ -762,8 +774,8 @@ test_relaunches_do_not_block_persist_polling() {
     "the slow first relaunch blocked lifecycle progress for the second mate"
   assert_contains "$out" "summary: 2 of 2 restarted, 0 nudged, 0 unreached" \
     "parallel relaunches were not both accounted for"
-  assert_grep 'fm-remote-secondmate-control.sh relaunch sm1 claude default default' "$dir/ssh.log" \
-    "an absent remote model and effort pin were not expressed as explicit defaults"
+  assert_grep 'fm-remote-secondmate-control.sh relaunch sm1 claude claude-opus-5-5 default' "$dir/ssh.log" \
+    "an absent remote model did not use the committed default explicitly"
   pass "T12 relaunch waits do not block fleet persistence polling"
 }
 

@@ -999,11 +999,14 @@ Blank lines and `#` comments stay legal anywhere, and a mate line is honored whe
 In a file that declares an override, a second default line, two overrides for one id, an override with no tokens or more than three, or a `mate` keyword naming an invalid secondmate id is an actionable error: resolution exits nonzero naming the file's line number and prints no token, so malformed pin config cannot resolve to a fallback in silence.
 In a file that declares no override, none of that applies: the legacy first-line rule governs, so an existing, already-valid file is read exactly as it was before this grammar existed.
 
-A bare `<harness>` preserves the previous behavior: harness only, with no model or effort launch flag.
-When the harness token is absent or `default`, secondmate launch falls back through `config/crew-harness` and then the primary's own harness, and no model or effort is read from that file.
+A bare `claude`, an absent model, or a `default` model selects the committed secondmate default `claude-opus-5-5`, owned by `fm-harness.sh`.
+Every secondmate launch and relaunch passes a concrete model explicitly, including remote routes; other adapters require an explicit model pin or `--model` and refuse launch without one.
+This does not change crewmate model defaults.
+When the harness token is absent or `default`, secondmate launch falls back through `config/crew-harness` and then the primary's own harness before applying that model policy, and no effort is read from that file.
+The remote doctor reports a differing Claude user-level model as an actionable warning, without changing user settings.
 
 [`fm-harness.sh`](../bin/fm-harness.sh)'s header owns the resolver commands and optional secondmate-id argument.
-Without an id they select the default line only; model and effort output is empty when no token applies.
+Without an id they select the default line only; model output includes the committed Claude default and effort output is empty when no token applies.
 When the file declares an override, every resolver read validates the whole file, even when no id is supplied or the malformed line concerns another mate.
 Every resolution site that knows which mate it is launching passes that id, so spawn, control-plane relaunch, and secondmate restart all land on one decision.
 `config/crew-harness` remains a bare adapter-name file and is never parsed for a model.
@@ -1014,7 +1017,8 @@ The regression coverage is in [`fm-secondmate-harness.test.sh`](../tests/fm-seco
 ### Per-launch overrides and inherited defaults
 
 An explicit harness argument to `fm-spawn.sh` still overrides either config file for that spawn only.
-An explicit `--model` or `--effort` overrides the matching token from `config/secondmate-harness`; for a local route, an explicit harness or raw launch command starts with clean model and effort defaults unless those flags are also passed.
+An explicit `--model` or `--effort` overrides the matching token from `config/secondmate-harness`; an explicit harness starts with its committed secondmate model default and clean effort unless those flags are also passed.
+Secondmate launches refuse raw launch commands because they cannot enforce an explicit model.
 An explicit harness also bypasses reading the pin file during spawn or control-plane relaunch, so malformed unused pin configuration cannot block that override. A relaunch supplying explicit `--harness`, `--model`, and `--effort` therefore does not read this configuration.
 
 Remote secondmate routes accept verified harness adapters only and reject raw launch commands.
