@@ -11,9 +11,12 @@
 #                                        harness did before this knob existed. With a
 #                                        secondmate id, a "mate <id>:" override line wins
 #                                        over the default line.
+#        fm-harness.sh secondmate-launch-model <harness> [model|default|-]
+#                                        normalize a launch model; refuse unpinned
+#                                        non-Claude secondmates.
 #        fm-harness.sh secondmate-model [id]
-#                                        print the optional MODEL token from
-#                                        config/secondmate-harness, or empty when absent.
+#                                        print the MODEL pin, or the committed
+#                                        claude-opus-5-5 default for Claude.
 #                                        An id selects that mate's override line first.
 #        fm-harness.sh secondmate-effort [id]
 #                                        print the optional EFFORT token from
@@ -621,14 +624,35 @@ resolve_secondmate() {
   echo "$sm"
 }
 
-# Print the optional model token (2nd field) for a secondmate id, or empty when
-# the resolved line is harness-only (the older format, so still empty) or when
-# its harness token defers to the crew chain.
+# Committed secondmate-only default. Other adapters require an explicit model;
+# never borrow a host's user-level model or change the crewmate default.
+secondmate_launch_model() { # <harness> [<model|default|->]
+  case "${2:-}" in
+    ''|default|-)
+      case "$1" in
+        claude) printf '%s\n' claude-opus-5-5 ;;
+        *) echo "error: secondmate harness '$1' requires an explicit model in config/secondmate-harness or --model" >&2; return 1 ;;
+      esac
+      ;;
+    *) printf '%s\n' "$2" ;;
+  esac
+}
+
+# Resolve the pin, then the committed default for the resolved adapter.
+# Non-Claude adapters without a model remain empty at inspection time; the
+# launch-model command refuses them at the launch boundary.
 resolve_secondmate_model() {
-  local sm
+  local sm model harness
   sm=$(secondmate_field 1 "${1:-}") || return 1
-  [ -n "$sm" ] && [ "$sm" != "default" ] || return 0
-  secondmate_field 2 "${1:-}"
+  model=
+  if [ -n "$sm" ] && [ "$sm" != default ]; then
+    model=$(secondmate_field 2 "${1:-}") || return 1
+  fi
+  harness=$(resolve_secondmate "${1:-}") || return 1
+  case "$model:$harness" in
+    :claude|default:claude|-:claude) secondmate_launch_model claude ;;
+    *) printf '%s\n' "$model" ;;
+  esac
 }
 
 # Print the optional effort token (3rd field) for a secondmate id, the same way.
@@ -673,6 +697,7 @@ case "${1:-}" in
   crew) resolve_crew ;;
   secondmate) resolve_secondmate "${2:-}" ;;
   secondmate-model) resolve_secondmate_model "${2:-}" ;;
+  secondmate-launch-model) secondmate_launch_model "${2:?harness is required}" "${3:-}" ;;
   secondmate-effort) resolve_secondmate_effort "${2:-}" ;;
   *) detect_own ;;
 esac

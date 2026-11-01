@@ -37,7 +37,8 @@
 #   C) Model/effort pin. config/secondmate-harness may carry optional model and
 #      effort tokens after the harness ("<harness> [<model>] [<effort>]"), read by
 #      fm-harness.sh secondmate-model / secondmate-effort. A bare harness-only
-#      line (today's format) yields empty model/effort - full backward-compat.
+#      Claude lines without a model select the committed default; other adapters
+#      require an explicit model at launch. Effort stays optional.
 #      fm-spawn.sh populates MODEL/EFFORT from those tokens for a --secondmate
 #      spawn only when the harness also resolves from that file, so the pin is
 #      durable across every respawn while explicit per-spawn harness/model/effort
@@ -145,7 +146,7 @@ SH
 # C) fm-harness.sh secondmate-model / secondmate-effort token resolution
 # ===========================================================================
 # config/secondmate-harness holds "<harness> [<model>] [<effort>]" on one line.
-# A bare harness (today's format) must yield empty model/effort - the
+# A bare Claude harness must yield its committed model default - the
 # backward-compat requirement. The file-line field uses \n for an embedded
 # newline (expanded via printf '%b') so a row can express a multi-line file; the
 # literal token ABSENT skips creating the file entirely.
@@ -167,16 +168,17 @@ test_secondmate_model_effort_tokens() {
     [ "$got_m" = "$exp_model" ] || fail "$label: model resolved '$got_m', expected '$exp_model'"
     [ "$got_e" = "$exp_effort" ] || fail "$label: effort resolved '$got_e', expected '$exp_effort'"
   done <<'ROWS'
-absent file -> own harness, empty model/effort^ABSENT^claude^^
-bare harness only -> empty model/effort (backward-compat)^claude^claude^^
+absent file -> own harness, committed model^ABSENT^claude^claude-opus-5-5^
+bare Claude harness -> committed model^claude^claude^claude-opus-5-5^
+default Claude model -> committed default^claude default^claude^claude-opus-5-5^
 harness + model -> model only^claude opus^claude^opus^
 harness + model + effort -> both^claude opus high^claude^opus^high
 signed Pi wrapper + model + effort preserves every token^pi-signed openai-codex/gpt-5.6-sol max^pi-signed^openai-codex/gpt-5.6-sol^max
-default harness token -> falls back to crew, empty model/effort^default^claude^^
+default harness token -> falls back to crew, committed model^default^claude^claude-opus-5-5^
 extra whitespace between tokens is tolerated^grok   grok-4    xhigh^grok^grok-4^xhigh
 leading/trailing blank lines and a comment are skipped^# a comment\n\nclaude opus low\n^claude^opus^low
 ROWS
-  pass "C1 fm-harness.sh secondmate-model/secondmate-effort resolve the optional tokens; bare harness stays empty (backward-compat)"
+  pass "C1 model/effort pins resolve with a committed default for bare Claude"
 }
 
 # ===========================================================================
@@ -210,16 +212,17 @@ default-only file with no id resolves the default (backward-compat)^pi model-a x
 legacy file ignores a second default line^pi model-a xhigh\ngrok model-b low^alpha^pi^model-a^xhigh
 legacy file ignores extra tokens^pi model-a xhigh extra^alpha^pi^model-a^xhigh
 legacy file ignores trailing malformed text without an override^pi model-a xhigh\nmate: grok model-b low^alpha^pi^model-a^xhigh
-legacy default fallback ignores later lines and extra tokens^default ignored high extra\ngrok model-b low^alpha^claude^^
+legacy default fallback ignores later lines and extra tokens^default ignored high extra\ngrok model-b low^alpha^claude^claude-opus-5-5^
 mate line wins for that exact id^pi def-m xhigh\nmate alpha: claude opus max^alpha^claude^opus^max
 mate line leaves every other id on the default^pi def-m xhigh\nmate alpha: claude opus max^beta^pi^def-m^xhigh
 mate line is ignored when no id is passed^pi def-m xhigh\nmate alpha: claude opus max^^pi^def-m^xhigh
 harness-only mate line yields empty model and effort^pi def-m xhigh\nmate alpha: grok^alpha^grok^^
+harness-only Claude mate gets committed default^pi def-m xhigh\nmate alpha: claude^alpha^claude^claude-opus-5-5^
 mate line listed above the default line is honored^mate alpha: muse m1 low\npi def-m xhigh^alpha^muse^m1^low
-mate line whose harness is default defers to the crew chain^claude opus high\nmate alpha: default^alpha^claude^^
+mate line whose harness is default defers to the crew chain^claude opus high\nmate alpha: default^alpha^claude^claude-opus-5-5^
 comments and blank lines stay legal between the lines^# pinned by the captain\n\n  \npi def-m xhigh\n\n# exception\nmate alpha: grok g1 max^alpha^grok^g1^max
 override with no default line governs its own id^mate alpha: grok g1 max^alpha^grok^g1^max
-id with no override and no default line falls through to own^mate alpha: grok g1 max^beta^claude^^
+id with no override and no default line falls through to own^mate alpha: grok g1 max^beta^claude^claude-opus-5-5^
 ROWS
   pass "D1 fm-harness.sh honors a mate override line for its id and changes nothing else"
 }
@@ -653,7 +656,7 @@ spawn_secondmate() {
   # arg list explicitly so the optional harness is omitted cleanly.
   local spawn_args=("$id" "$home")
   [ -n "$harness" ] && spawn_args+=("$harness")
-  spawn_args+=(--secondmate)
+  spawn_args+=(--secondmate --model fixture-model)
   PATH="$fakebin:$BLIND_BIN:$BASE_PATH" TMUX='' CLAUDECODE=1 \
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$world/home" HOME="$world/home/user-home" CLAUDE_CONFIG_DIR='' \
     FM_STATE_OVERRIDE="$world/home/state" FM_DATA_OVERRIDE="$world/home/data" \
@@ -795,7 +798,7 @@ test_spawn_cursor_secondmate_launches_with_its_primary_contract() {
   sm="$w/sm"
   launchlog="$w/launch.log"
   mkdir -p "$w/home/config" "$w/home/state" "$w/home/data" "$w/home/projects"
-  printf 'cursor\n' > "$w/home/config/secondmate-harness"
+  printf 'cursor fixture-model\n' > "$w/home/config/secondmate-harness"
   make_seeded_home "$sm" sm
   fakebin=$(make_launch_capturing_tmux "$w/tmux")
   : > "$launchlog"
@@ -967,12 +970,13 @@ test_spawn_explicit_backend_precedence_over_env_and_inherited_config() {
   pass "B5c spawn: explicit --backend wins over FM_BACKEND and inherited config/backend"
 }
 
-# A bare "<harness>" secondmate-harness file (today's format) must launch with
-# NO --model/--effort flag at all, and meta must keep recording model=default,
-# effort=default - the core backward-compat requirement of the new format.
+# A bare Claude pin must use the committed model, not the host's user default.
+# Effort is still optional.
 test_spawn_bare_harness_no_model_effort_flag() {
   local w sm meta launchlog launch out status
   w="$TMP_ROOT/spawn-bare-tokens"
+  mkdir -p "$w/home/user-home/.claude"
+  printf '{"model":"fable"}\n' > "$w/home/user-home/.claude/settings.json"
   sm="$w/sm"
   launchlog="$w/launch.log"
   mkdir -p "$w/home/config"
@@ -983,14 +987,14 @@ test_spawn_bare_harness_no_model_effort_flag() {
   expect_code 0 "$status" "bare-harness secondmate spawn should succeed"
 
   meta="$w/home/state/sm.meta"
-  [ "$(meta_field "$meta" model)" = default ] || fail "bare-tokens: meta model not default (got '$(meta_field "$meta" model)')"
+  [ "$(meta_field "$meta" model)" = claude-opus-5-5 ] || fail "bare-tokens: meta model did not use committed default"
   [ "$(meta_field "$meta" effort)" = default ] || fail "bare-tokens: meta effort not default (got '$(meta_field "$meta" effort)')"
   launch=$(cat "$launchlog")
   assert_contains "$launch" "CLAUDE_CODE_SEND_FEEDBACK=0 claude" \
     "bare-tokens: Claude secondmate launch did not disable feedback drafts"
-  assert_not_contains "$launch" "--model" "bare-tokens: launch must not carry a --model flag"
+  assert_contains "$launch" "--model 'claude-opus-5-5'" "bare-tokens: launch must pin the committed model"
   assert_not_contains "$launch" "--effort" "bare-tokens: launch must not carry an --effort flag"
-  pass "C2 spawn: a bare harness-only secondmate-harness file launches with no model/effort flag (backward-compat)"
+  pass "C2 spawn: a bare Claude pin passes the committed model explicitly"
 }
 
 # "<harness> <model>" durably threads --model into the secondmate launch and
@@ -1144,19 +1148,12 @@ test_spawn_explicit_harness_does_not_inherit_secondmate_harness_tokens() {
   printf 'claude opus high\n' > "$w/home/config/secondmate-harness"
   make_seeded_home "$sm" sm
 
-  spawn_secondmate_capture "$w" sm "$sm" "$launchlog" --harness codex >/dev/null 2>&1
-
+  if spawn_secondmate_capture "$w" sm "$sm" "$launchlog" --harness codex >/dev/null 2>&1; then
+    fail "unpinned non-Claude secondmate should refuse instead of using the host default"
+  fi
   meta="$w/home/state/sm.meta"
-  [ "$(meta_field "$meta" harness)" = codex ] || fail "explicit-harness-no-tokens: meta harness not codex"
-  [ "$(meta_field "$meta" model)" = default ] || fail "explicit-harness-no-tokens: meta model should stay default"
-  [ "$(meta_field "$meta" effort)" = default ] || fail "explicit-harness-no-tokens: meta effort should stay default"
-  launch=$(cat "$launchlog")
-  assert_contains "$launch" "codex --dangerously-bypass-approvals-and-sandbox" \
-    "explicit-harness-no-tokens: launch did not use codex"
-  assert_not_contains "$launch" "--model" "explicit-harness-no-tokens: launch must not carry a --model flag"
-  assert_not_contains "$launch" "model_reasoning_effort" \
-    "explicit-harness-no-tokens: launch must not carry a codex effort flag"
-  pass "C7 spawn: an explicit --harness starts with clean model/effort defaults"
+  [ ! -f "$meta" ] || fail "refused unpinned model published metadata"
+  pass "C7 spawn: an explicit non-Claude harness requires a model"
 }
 
 test_spawn_explicit_harness_uses_explicit_profile_axes() {
@@ -1193,7 +1190,7 @@ test_spawned_secondmate_uses_its_harness_supervision_model() {
     sm="$w/sm"
     launchlog="$w/launch.log"
     mkdir -p "$w/home/config"
-    printf '%s\n' "$harness" > "$w/home/config/secondmate-harness"
+    printf '%s fixture-model\n' "$harness" > "$w/home/config/secondmate-harness"
     make_seeded_home "$sm" sm
     spawn_secondmate_capture "$w" sm "$sm" "$launchlog" >/dev/null 2>&1
     fm_write_meta "$sm/state/task.meta" "window=firstmate:fm-task" "kind=ship"
@@ -1238,12 +1235,12 @@ test_spawn_fallback_chain_and_crew_scout_unaffected() {
   printf 'codex\n' > "$w/home/config/crew-harness"
   make_seeded_home "$sm" sm
 
-  spawn_secondmate_capture "$w" sm "$sm" "$launchlog" >/dev/null 2>&1
+  spawn_secondmate_capture "$w" sm "$sm" "$launchlog" --model fixture-model >/dev/null 2>&1
 
   meta="$w/home/state/sm.meta"
   [ "$(meta_field "$meta" harness)" = codex ] \
     || fail "fallback: secondmate harness did not fall back to crew-harness codex"
-  [ "$(meta_field "$meta" model)" = default ] || fail "fallback: meta model should stay default with no tokens anywhere"
+  [ "$(meta_field "$meta" model)" = fixture-model ] || fail "fallback: explicit secondmate model was lost"
   [ "$(meta_field "$meta" effort)" = default ] || fail "fallback: meta effort should stay default with no tokens anywhere"
 
   # Crew/scout launch: same crew-harness config, no --secondmate. Must resolve
@@ -2814,7 +2811,7 @@ test_config_reread_bootstrap_path_and_spawn_flexibility() {
   fm_config_reread_mark_pending "$stale" "$stale.pending" \
     || fail "could not create spawn stale reread marker"
   launchlog="$w/spawn-flex.launch.log"
-  spawn_secondmate_capture "$w" sm-flex "$sm" "$launchlog" --harness pi >/dev/null 2>&1
+  spawn_secondmate_capture "$w" sm-flex "$sm" "$launchlog" --harness pi --model test/model >/dev/null 2>&1
   assert_no_reread_pending "$sm"
   assert_no_reread_instructions "$sm"
   launch=$(cat "$launchlog")
@@ -2917,7 +2914,7 @@ SH
     FM_STATE_OVERRIDE="$w/home/state" FM_DATA_OVERRIDE="$w/home/data" \
     FM_PROJECTS_OVERRIDE="$w/home/projects" FM_CONFIG_OVERRIDE="$w/home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_LAUNCH_LOG="$launchlog" \
-    "$ROOT/bin/fm-spawn.sh" sm "$sm" --secondmate 2>&1); status=$?
+    "$ROOT/bin/fm-spawn.sh" sm "$sm" --secondmate --model fixture-model 2>&1); status=$?
   expect_code 0 "$status" "spawn should remain available after reread cleanup failure"
   assert_contains "$out" "CONFIG_REREAD: secondmate sm: quarantined pre-relaunch generations" \
     "spawn cleanup failure did not emit a CONFIG_REREAD quarantine diagnostic"

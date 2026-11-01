@@ -26,6 +26,7 @@ TMP=$(fm_test_tmproot fm-remote-secondmate-relaunch)
 HOME_DIR="$TMP/home"
 FAKEBIN=$(fm_fakebin "$TMP/fake")
 mkdir -p "$HOME_DIR/data" "$HOME_DIR/state" "$HOME_DIR/config"
+printf 'claude\n' > "$HOME_DIR/config/secondmate-harness"
 
 printf -- '- ios - iOS delivery (host: remote-mac; root: /srv/fm; home: /srv/fm-home; scope: iOS; projects: alpha; added 2026-08-01)\n' \
   > "$HOME_DIR/data/secondmates.md"
@@ -71,7 +72,13 @@ IFS=$'\t' read -r cmd action id harness model effort <<EOF
 $command_fields
 EOF
 [ "$cmd" = fm-remote-secondmate-control.sh ] || exit 93
+if [ "$action" = prepare-launch ]; then
+  [ "$FM_FAKE_RELAUNCH_MODE" != stale ] || { printf 'error: remote commit=old primary=%s\n' "$harness"; exit 1; }
+  printf 'current: %s\n' "$harness"
+  exit 0
+fi
 [ "$action" = relaunch ] || exit 94
+case "$model" in ''|default|-) printf 'error: parent sent an unresolved model\n'; exit 96 ;; esac
 case "$FM_FAKE_RELAUNCH_MODE" in
   refuse)
     printf 'error: unverified remote secondmate harness: %s\n' "$harness" >&2
@@ -137,11 +144,22 @@ assert_no_grep 'harness=default' "$HOME_DIR/state/ios.meta" \
   "the parent record must not keep the unresolved request"
 pass "a remote relaunch records the identity the host confirmed"
 
+# --- stale code refuses before the remote relaunch --------------------------
+reset_meta
+cp "$HOME_DIR/state/ios.meta" "$TMP/ios-before-stale.meta"
+FM_FAKE_RELAUNCH_MODE=stale
+OUT=$(run_relaunch ios claude default default); RC=$?
+unset FM_FAKE_RELAUNCH_MODE
+[ "$RC" -ne 0 ] || fail "a stale remote code root was allowed to relaunch"
+cmp -s "$TMP/ios-before-stale.meta" "$HOME_DIR/state/ios.meta" || fail "stale refusal rewrote the route"
+assert_contains "$OUT" 'remote commit=old primary=' "stale code refusal omitted commit evidence"
+pass "remote relaunch refuses stale code before replacing the agent"
+
 # --- a refused relaunch leaves the parent's record untouched -----------------
 reset_meta
 cp "$HOME_DIR/state/ios.meta" "$TMP/ios-before-refusal.meta"
 FM_FAKE_RELAUNCH_MODE=refuse
-OUT=$(run_relaunch ios notaharness - -); RC=$?
+OUT=$(run_relaunch ios notaharness fixture-model -); RC=$?
 unset FM_FAKE_RELAUNCH_MODE
 [ "$RC" -ne 0 ] || fail "a refused host relaunch must not be reported as successful"
 assert_contains "$OUT" "unverified remote secondmate harness" \

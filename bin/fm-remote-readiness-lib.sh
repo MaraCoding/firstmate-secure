@@ -2,7 +2,7 @@
 # fm-remote-readiness-lib.sh - the remote second-mate readiness gate sequence.
 #
 # Source this file and call:
-#   fm_remote_readiness_ensure <bin-dir> <secondmate-id>
+#   fm_remote_readiness_ensure <bin-dir> <secondmate-id> [<harness> <resolved-model>]
 #
 # It runs bin/fm-remote-doctor.sh on that route's configured host, and when the
 # read-only run reports any gap it runs the doctor again with --fix and then a
@@ -21,21 +21,25 @@
 # shellcheck disable=SC2034
 FM_REMOTE_READINESS_OUT=
 
-fm_remote_readiness_ensure() { # <bin-dir> <secondmate-id>
+fm_remote_readiness_ensure() { # <bin-dir> <secondmate-id> [<harness> <resolved-model>]
   local bin_dir=$1 id=$2 out rc
+  local -a model_args=()
+  if [ "${3:-}" = claude ] && [ -n "${4:-}" ]; then
+    model_args=(--claude-model "$4")
+  fi
 
-  out=$("$bin_dir/fm-on.sh" "$id" fm-remote-doctor.sh < /dev/null 2>&1)
+  out=$("$bin_dir/fm-on.sh" "$id" fm-remote-doctor.sh ${model_args[@]+"${model_args[@]}"} < /dev/null 2>&1)
   rc=$?
   FM_REMOTE_READINESS_OUT=$out
   [ "$rc" -ne 0 ] || return 0
   [ "$rc" -ne 255 ] || return 255
 
-  out=$("$bin_dir/fm-on.sh" "$id" fm-remote-doctor.sh --fix < /dev/null 2>&1)
+  out=$("$bin_dir/fm-on.sh" "$id" fm-remote-doctor.sh --fix ${model_args[@]+"${model_args[@]}"} < /dev/null 2>&1)
   rc=$?
   FM_REMOTE_READINESS_OUT=$out
   [ "$rc" -ne 255 ] || return 255
 
-  out=$("$bin_dir/fm-on.sh" "$id" fm-remote-doctor.sh < /dev/null 2>&1)
+  out=$("$bin_dir/fm-on.sh" "$id" fm-remote-doctor.sh ${model_args[@]+"${model_args[@]}"} < /dev/null 2>&1)
   rc=$?
   FM_REMOTE_READINESS_OUT=$out
   [ "$rc" -ne 255 ] || return 255

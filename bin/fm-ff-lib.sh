@@ -74,6 +74,23 @@ primary_head_commit() {
   git -C "$root" rev-parse --verify --quiet "refs/heads/$default^{commit}" 2>/dev/null || return 1
 }
 
+# Launch-boundary proof, including working-tree and staged bin changes. A
+# matching HEAD alone does not prove the scripts being executed are current.
+# No mutation: callers may sync through ff_target first, or refuse this launch.
+require_secondmate_launch_freshness() { # <directory> <primary-commit>
+  local dir=$1 expected=$2 actual
+  actual=$(git -C "$dir" rev-parse --verify HEAD 2>/dev/null || printf unreadable)
+  if [ "$actual" != "$expected" ]; then
+    printf 'error: secondmate launch refused: %s commit=%s primary=%s; sync through the guarded fast-forward path first\n' "$dir" "$actual" "$expected" >&2
+    return 1
+  fi
+  if ! git -C "$dir" diff --quiet "$expected" -- bin/ ||
+    [ -n "$(git -C "$dir" status --porcelain --untracked-files=no -- bin/)" ]; then
+    printf 'error: secondmate launch refused: %s commit=%s primary=%s; tracked bin/ differs\n' "$dir" "$actual" "$expected" >&2
+    return 1
+  fi
+}
+
 resolve_path() {
   # Resolve to a canonical absolute path, falling back to the literal input
   # when the directory does not exist (so callers can still dedup/skip on it).

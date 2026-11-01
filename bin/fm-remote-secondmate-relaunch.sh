@@ -46,8 +46,18 @@ REMOTE_HOST=$(fm_meta_get "$META" remote_host)
 [ -n "$REMOTE_HOST" ] \
   || die "task $ID is not a remotely placed secondmate; use bin/fm-control.sh $ID relaunch instead"
 
+# Resolve defaults in the parent, never against the remote host's preferences.
+case "$HARNESS" in
+  default|-) HARNESS=$("$SCRIPT_DIR/fm-harness.sh" secondmate "$ID") || exit 1 ;;
+esac
+MODEL=$("$SCRIPT_DIR/fm-harness.sh" secondmate-launch-model "$HARNESS" "$MODEL") || exit 1
+# shellcheck source=bin/fm-ff-lib.sh
+. "$SCRIPT_DIR/fm-ff-lib.sh"
+PRIMARY_COMMIT=$(primary_head_commit "$FM_ROOT") || die "primary default-branch commit cannot be resolved"
+"$SCRIPT_DIR/fm-on.sh" "$ID" fm-remote-secondmate-control.sh prepare-launch "$ID" "$PRIMARY_COMMIT" </dev/null || exit $?
+
 RELAUNCH_OUT=$("$SCRIPT_DIR/fm-on.sh" "$ID" fm-remote-secondmate-control.sh \
-  relaunch "$ID" "$HARNESS" "$MODEL" "$EFFORT" </dev/null 2>&1) || {
+  relaunch "$ID" "$HARNESS" "$MODEL" "$EFFORT" "$PRIMARY_COMMIT" </dev/null 2>&1) || {
   rc=$?
   printf '%s\n' "$RELAUNCH_OUT" >&2
   exit "$rc"

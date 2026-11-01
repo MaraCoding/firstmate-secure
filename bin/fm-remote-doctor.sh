@@ -2,7 +2,10 @@
 # Check, and optionally repair, one remote account's second-mate readiness.
 #
 # Usage:
-#   bin/fm-on.sh <secondmate-id|ssh-alias> fm-remote-doctor.sh [--fix]
+#   bin/fm-on.sh <secondmate-id|ssh-alias> fm-remote-doctor.sh [--fix] [--claude-model <resolved-model>]
+# --claude-model carries the parent's resolved Claude secondmate model; absent,
+# compare against fm-harness.sh's committed Claude default. A differing user
+# setting is an actionable warning, not a readiness failure: launches pin it.
 #
 # Run it through fm-on.sh so the fixed entrypoint invokes this readiness owner
 # over its plain SSH bootstrap. The command reports the same filesystem-composed
@@ -37,6 +40,7 @@
 #   fix <check>=failed: <why the repair did not land>   (--fix only)
 #   check <check>=ok: <evidence>
 #   check <check>=skip: <why this host is exempt>
+#   check <check>=warning: <advisory drift, not a readiness failure>
 #   check <check>=fixable: <gap --fix can close>
 #   check <check>=human: <gap only a person at that machine can close>
 #   action: <check>: <the exact step to take>
@@ -84,17 +88,23 @@ ENTRYPOINT_LINK="${HOME:-}/.local/bin/fm-remote-entrypoint.sh"
 usage() { sed -n '2,5p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 
 MODE=check
+CLAUDE_MODEL=
+while [ "$#" -gt 0 ]; do
 case "${1:-}" in
-  '') ;;
   --fix) MODE=fix; shift ;;
   --worker-tool-probe)
     [ "${FM_REMOTE_JOB_ACTIVE:-}" = 1 ] || { printf 'error: worker tool probe requires the remote job worker\n' >&2; exit 64; }
     MODE='worker-tool-probe'
     shift
     ;;
+  --claude-model)
+    [ "$#" -ge 2 ] && [ -n "$2" ] || usage
+    CLAUDE_MODEL=$2
+    shift 2
+    ;;
   *) usage ;;
 esac
-[ "$#" -eq 0 ] || usage
+done
 
 PLATFORM=$(fm_remote_job_platform)
 UID_NUM=$(id -u 2>/dev/null) || UID_NUM=
@@ -698,6 +708,23 @@ check_herdr_server() {
     "rerun this command with --fix to start it"
 }
 
+check_secondmate_model() {
+  local resolved user_model settings="${CLAUDE_CONFIG_DIR:-${HOME:-}/.claude}/settings.json"
+  command -v jq >/dev/null 2>&1 || return 0
+  [ -f "$settings" ] || return 0
+  resolved=$("$SCRIPT_DIR/fm-harness.sh" secondmate-launch-model claude "$CLAUDE_MODEL") || return 1
+  user_model=$(jq -r '.model // empty' "$settings" 2>/dev/null) || {
+    record secondmate-model "human: cannot read $settings" "repair its JSON, then rerun this command"
+    return 0
+  }
+  if [ -n "$user_model" ] && [ "$user_model" != "$resolved" ]; then
+    record secondmate-model "warning: user model=$user_model differs from resolved secondmate model=$resolved" \
+      "align $settings if desired; Firstmate passes --model $resolved explicitly and does not change user settings"
+  else
+    record secondmate-model "ok: user model matches $resolved or is unset"
+  fi
+}
+
 check_entrypoint_link() {
   local want
   if [ -z "${FM_ROOT_OVERRIDE:-}" ]; then
@@ -729,6 +756,7 @@ run_checks() { # <resolved-login-shell>
   check_launch_agent "$shell"
   check_herdr_server
   check_entrypoint_link
+  check_secondmate_model
 }
 
 # --- repairs ----------------------------------------------------------------
@@ -926,6 +954,9 @@ while [ "$i" -lt "${#CHECK_NAMES[@]}" ]; do
   printf 'check %s=%s\n' "${CHECK_NAMES[$i]}" "${CHECK_VALUES[$i]}"
   case "${CHECK_VALUES[$i]}" in
     fixable:*|human:*) GAPS+=("$i") ;;
+    warning:*)
+      [ -z "${CHECK_ACTIONS[$i]}" ] || printf 'action: %s: %s\n' "${CHECK_NAMES[$i]}" "${CHECK_ACTIONS[$i]}"
+      ;;
   esac
   i=$((i + 1))
 done

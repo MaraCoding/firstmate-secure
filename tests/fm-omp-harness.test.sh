@@ -234,7 +234,7 @@ test_secondmate_launch_relies_on_discovery() {
     FM_STATE_OVERRIDE="$world/home/state" FM_DATA_OVERRIDE="$world/home/data" \
     FM_PROJECTS_OVERRIDE="$world/home/projects" FM_CONFIG_OVERRIDE="$world/home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_LAUNCH_LOG="$launchlog" \
-    "$ROOT/bin/fm-spawn.sh" sm "$home" omp --secondmate 2>&1)
+    "$ROOT/bin/fm-spawn.sh" sm "$home" omp --model openai-codex/gpt-6-astra --secondmate 2>&1)
   status=$?
   expect_code 0 "$status" "omp secondmate spawn should succeed: $out"
   assert_grep "harness=omp" "$world/home/state/sm.meta" "secondmate meta missing harness=omp"

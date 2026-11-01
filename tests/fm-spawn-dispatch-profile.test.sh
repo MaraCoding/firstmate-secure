@@ -93,7 +93,14 @@ enable_dispatch_profile() {
 }
 
 make_seeded_secondmate_home() {
-  local home=$1 id=$2
+  local home=$1 id=$2 harness
+  # Only secondmate fixtures need a model; ordinary worker defaults stay empty.
+  if [ ! -f "$HOME_DIR/config/secondmate-harness" ]; then
+    harness=$(cat "$HOME_DIR/config/crew-harness")
+    if [ "$harness" != claude ]; then
+      printf '%s fixture-model\n' "$harness" > "$HOME_DIR/config/secondmate-harness"
+    fi
+  fi
   mkdir -p "$home/bin" "$home/data"
   printf '# Firstmate\n' > "$home/AGENTS.md"
   printf '%s\n' "$id" > "$home/.fm-secondmate-home"
@@ -1104,7 +1111,7 @@ test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity() {
   id=profile-pi-signed-secondmate-z8d
   rec=$(make_spawn_case profile-pi-signed-secondmate codex "$id")
   read_case_record "$rec"
-  printf '%s\n' pi-signed > "$HOME_DIR/config/secondmate-harness"
+  printf '%s\n' 'pi-signed fixture-model' > "$HOME_DIR/config/secondmate-harness"
   sm="$CASE_DIR/secondmate-home"
   make_seeded_secondmate_home "$sm" "$id"
   sm=$(cd "$sm" && pwd -P)
@@ -1116,13 +1123,13 @@ test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity() {
   expect_code 0 "$status" "pi-signed persistent secondmate spawn should succeed"
   assert_contains "$out" "spawned $id harness=pi-signed kind=secondmate" \
     "pi-signed secondmate spawn did not preserve its runtime identity"
-  assert_meta_profile "$HOME_DIR/state/$id.meta" pi-signed default default
+  assert_meta_profile "$HOME_DIR/state/$id.meta" pi-signed fixture-model default
   cmp -s "$ROOT/AGENTS.md" "$sm/AGENTS.md" || fail "secondmate launch rewrote the supervisor contract"
   cmp -s "$CASE_DIR/charter-before" "$sm/data/charter.md" || fail "secondmate launch rewrote the charter"
   assert_absent "$HOME_DIR/data/$id/launch-brief.md" "secondmate launch received a worker overlay"
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "< '$sm/data/charter.md'" "secondmate launch lost its original charter"
-  assert_contains "$launch" "FM_PI_HARNESS=pi-signed '$FAKEBIN_DIR/pi-signed' --tui-mode regular --approve -e '$sm/.pi/extensions/fm-primary-turnend-guard.ts' -e '$sm/.pi/extensions/fm-primary-pi-watch.ts'" \
+  assert_contains "$launch" "FM_PI_HARNESS=pi-signed '$FAKEBIN_DIR/pi-signed' --tui-mode regular --approve --model 'fixture-model' -e '$sm/.pi/extensions/fm-primary-turnend-guard.ts' -e '$sm/.pi/extensions/fm-primary-pi-watch.ts'" \
     "pi-signed secondmate did not force the regular TUI with Pi's primary extension launch shape and seeded-home --approve"
   if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
     printf '# evidence begin: persistent secondmate\n%s\n' "$out"
@@ -1139,7 +1146,7 @@ test_pi_seeded_secondmate_preapproves_project_trust() {
     id="profile-${harness}-seeded-approve-z8e"
     rec=$(make_spawn_case "profile-${harness}-seeded-approve" codex "$id")
     read_case_record "$rec"
-    printf '%s\n' "$harness" > "$HOME_DIR/config/secondmate-harness"
+    printf '%s fixture-model\n' "$harness" > "$HOME_DIR/config/secondmate-harness"
     sm="$CASE_DIR/secondmate-home"
     make_seeded_secondmate_home "$sm" "$id"
     sm=$(cd "$sm" && pwd -P)
@@ -1181,7 +1188,7 @@ test_pi_approve_probe_omits_unsupported_flag() {
     id="profile-${harness}-no-approve-z8g"
     rec=$(make_spawn_case "profile-${harness}-no-approve" codex "$id")
     read_case_record "$rec"
-    printf '%s\n' "$harness" > "$HOME_DIR/config/secondmate-harness"
+    printf '%s fixture-model\n' "$harness" > "$HOME_DIR/config/secondmate-harness"
     sm="$CASE_DIR/secondmate-home"
     make_seeded_secondmate_home "$sm" "$id"
     sm=$(cd "$sm" && pwd -P)
@@ -1494,7 +1501,7 @@ test_pi_exclude_tools_do_not_leak_across_homes_or_to_secondmates() {
   id_a=excl-sm-z9h
   rec_a=$(make_spawn_case excl-sm codex "$id_a")
   read_case_record "$rec_a"
-  printf '%s\n' pi > "$HOME_DIR/config/secondmate-harness"
+  printf '%s\n' 'pi fixture-model' > "$HOME_DIR/config/secondmate-harness"
   write_exclude_file "$HOME_DIR" 'mcp__srv__writeTool'
   sm="$CASE_DIR/secondmate-home"
   make_seeded_secondmate_home "$sm" "$id_a"

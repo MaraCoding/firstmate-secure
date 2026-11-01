@@ -638,7 +638,7 @@ A live remote second mate is restarted with `relaunch`, which runs the ordinary 
 The endpoint record there was written by a host-local launch and carries no remote placement.
 So the transaction, its checkpoint, and its postconditions are the local ones.
 
-The primary passes `<harness> <model|default|-> <effort|default|->` explicitly, using `default` when an axis has no parent pin.
+The primary passes the harness and concrete model explicitly, resolving the [secondmate model policy](configuration.md#choose-the-secondmate-harness) before transport; effort may still use `default`.
 It passes them explicitly because `config/secondmate-harness` is not inherited into a second mate's home, and the file on that host belongs to a different home.
 Letting the far side re-resolve it would silently move the mate onto another runtime.
 SSH exit 255 leaves completion unknown and the route preserved, exactly as every other verb here.
@@ -649,6 +649,9 @@ Move a live remote second mate onto a newly pinned harness, model, or effort wit
 Session start and every remote launch converge the persistent remote home on the primary's own default-branch commit rather than on the Firstmate copy that host keeps.
 The [`secondmate-provisioning` skill](../.agents/skills/secondmate-provisioning/SKILL.md) owns the guarded convergence contract, including the distinct `/updatefirstmate` behavior, and [`bin/fm-remote-secondmate-control.sh`](../bin/fm-remote-secondmate-control.sh) owns the commit-import mechanics.
 Neither session start nor launch moves the host's own Firstmate copy.
+Before a remote launch or relaunch, the code root must already match the primary's target commit with unchanged tracked `bin/`; the remote home then converges through the guarded sync and must pass the same proof.
+A mismatched or modified code root refuses launch with both commits, so update that host through the guarded update path first.
+Local secondmate relaunches also refuse a lagging home or modified tracked `bin/` before stopping the running agent.
 An unsafe or unavailable target is reported and left untouched.
 A completed sync reports which watched instruction paths its advance changed.
 The primary needs that fact because it cannot diff a checkout it cannot read.
