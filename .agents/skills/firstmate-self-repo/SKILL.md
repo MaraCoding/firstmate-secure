@@ -1,6 +1,8 @@
 ---
 name: firstmate-self-repo
-description: Load before dispatching, promoting, relaunching, or delivering any task whose project is the firstmate repository itself, when a firstmate bug or improvement idea surfaces in ordinary use, before granting or revoking upstream publication authority, and before deciding whether any push, pull request, issue, comment, or fork may reach firstmate's own upstream.
+description: >-
+  Load before dispatching, promoting, relaunching, or delivering work on the firstmate repo itself, when a firstmate bug or idea surfaces,
+  and before granting upstream publication authority or any push, PR, issue, comment, or fork reaching firstmate's upstream.
 user-invocable: false
 metadata:
   internal: true

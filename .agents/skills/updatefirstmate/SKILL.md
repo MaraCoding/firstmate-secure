@@ -1,8 +1,7 @@
 ---
 name: updatefirstmate
 description: >-
-  Self-update a running firstmate and its secondmates to the latest from origin.
-  Use when the captain invokes /updatefirstmate (e.g. "/updatefirstmate", "update firstmate", "pull the latest firstmate").
+  Self-update a running firstmate and its secondmates from origin on /updatefirstmate, "update firstmate", or "pull the latest firstmate".
 user-invocable: true
 metadata:
   internal: true

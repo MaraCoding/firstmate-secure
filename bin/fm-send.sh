@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Steer a task by durable record: write the message into the task's steering
 # inbox and ring a constant doorbell line into its terminal, best-effort.
-# Usage: fm-send.sh <target> [--resolve-key <key>]... [--fire-and-forget <delivery-id>] <text...>
+# Usage: fm-send.sh <target> [--resolve-key <key>]... [--fire-and-forget <delivery-id>] [--allow-large-context] <text...>
 #   <target> may be an exact task id, a legacy fm-<id> task label resolved
 #   through this home's state/<id>.meta, or an explicit well-formed backend
 #   target. fm-send refuses unresolved guesses rather than falling back to a
@@ -11,6 +11,10 @@
 # before anything is marked, recorded, or typed, because an empty marked
 # secondmate request delivers only marker and correlation bytes and leaves the
 # parent waiting on a reply to nothing.
+# A text steer to a local ship or scout whose live context is past the crew
+# context limit is refused before anything is recorded (bin/fm-context-check.sh
+# owns the measure and the knob); --allow-large-context or
+# FM_SEND_CONTEXT_CHECK=0 skips the check, and unknown context never blocks.
 # Special keys instead of text: fm-send.sh <target> --key Enter
 # Key support is backend-specific: tmux/herdr support Escape, Enter, and C-c;
 # Orca currently supports Enter and C-c only, and rejects Escape.
@@ -462,6 +466,7 @@ fi
 # message exactly as before, so ordinary sends are byte-identical.
 RESOLVE_KEYS=
 FIRE_AND_FORGET_ID=
+ALLOW_LARGE_CONTEXT=0
 fm_send_add_resolve_key() { # <key>
   local k=$1
   case "$k" in
@@ -490,6 +495,10 @@ while :; do
     ;;
   --resolve-key=*)
     fm_send_add_resolve_key "${1#--resolve-key=}" || exit 1
+    shift
+    ;;
+  --allow-large-context)
+    ALLOW_LARGE_CONTEXT=1
     shift
     ;;
   --fire-and-forget)
@@ -793,6 +802,22 @@ else
   if [ -z "${MESSAGE//[[:space:]]/}" ]; then
     echo "error: a text steer requires a nonempty message; nothing was sent (an empty marked request would deliver only marker and correlation bytes and leave the parent waiting on a reply to nothing)" >&2
     exit 1
+  fi
+  # Context handoff gate (AGENTS.md section 7): a ship or scout whose live
+  # session context is past the crew context limit is respawned with a handoff
+  # brief rather than steered. Unknown context never blocks.
+  if [ -n "$TARGET_SELECTOR" ] && [ -n "$TARGET_META" ] && [ "$TARGET_BACKEND" != remote ] &&
+    [ "$ALLOW_LARGE_CONTEXT" = 0 ] && [ "${FM_SEND_CONTEXT_CHECK:-1}" != 0 ]; then
+    case "$(fm_meta_get "$TARGET_META" kind)" in
+    ship | scout)
+      context_rc=0
+      context_line=$("$SCRIPT_DIR/fm-context-check.sh" "$(fm_send_id_from_meta "$TARGET_META")" 2>&1) || context_rc=$?
+      if [ "$context_rc" = 3 ]; then
+        echo "error: steer not sent: $(fm_send_id_from_meta "$TARGET_META") is past the crew context limit ($context_line). End the session and respawn it with a handoff brief instead of steering (bin/fm-context-check.sh header); pass --allow-large-context only when this one steer must still land, such as answering an open decision before the handoff." >&2
+        exit 1
+      fi
+      ;;
+    esac
   fi
   if [ "$TARGET_BACKEND" = remote ]; then
     FM_SEND_REMOTE_BUDGET=${FM_SEND_REMOTE_BUDGET:-30}

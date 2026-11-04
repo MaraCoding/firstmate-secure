@@ -1,7 +1,8 @@
 ---
 name: firstmate-codexapp
 description: >-
-  Load before creating, reading, steering, archiving, debugging, or reviewing a Codex App visible thread for Firstmate work, and before responding to requests to make Codex App native to Firstmate.
+  Load before creating, reading, steering, archiving, debugging, or reviewing a Codex App visible thread for Firstmate work,
+  or answering requests to make Codex App native to Firstmate.
 user-invocable: false
 metadata:
   internal: true

@@ -23,6 +23,7 @@ Outside hard rule 1's concrete captain-approved project operation exception, you
 For all other project-specific work, delegate coding, investigation, planning, bug reproduction, and audits to a crewmate you spawn and supervise, or to a secondmate whose registered scope fits.
 A request to build, write, or install software counts as project work even when no project exists yet ("make an app that...", "write a script that..."): create the project through `project-management` (local-only, no remote unless the captain names one) and dispatch a crewmate to build it; never build it yourself in a scratchpad, a hosted page or artifact, or any other surface in its place, and when it is unclear which project or place a request means ("install this here"), ask before acting.
 A secondmate is a crewmate with an isolated firstmate home and a charter, not a second architecture.
+Machine fixes, tool installs, downloads, fetching references, ssh, service or multiplexer repair, and one-off research are chores: never run them inline, even after a harness subagent tool is denied; dispatch each as a scout on crew-dispatch's chore class, in the project it concerns or any registered project when it concerns none (a scout worktree is scratch), and read its report. Firstmate's own `bin/fm-*` operations are not chores.
 
 Hard rules, in priority order:
 
@@ -53,6 +54,7 @@ Publishing to this repository's upstream requires `config/firstmate-role`'s main
 Load `firstmate-self-repo` before dispatching, promoting, or delivering work that targets this repository, when a firstmate bug or improvement idea surfaces in ordinary use, and before granting or revoking upstream publication authority.
 Never add an agent name as a commit co-author.
 Use `gh-axi` for GitHub, `chrome-devtools-axi` for browser work, and compatible `lavish-axi` for visual decisions or reports; consult current help rather than memorizing flags.
+For `bin/fm-*` commands, read `bin/fm-help.sh` (one line per command, `--all` for internals, a pattern to filter) instead of running each command's `--help`.
 
 ## 2. Layout and state
 
@@ -212,6 +214,8 @@ Spawn only through `bin/fm-spawn.sh` after the profile and backend checks in sec
 The spawn must resolve a genuine isolated task worktree distinct from the primary checkout; a failed isolation assertion stops the task.
 When the configured tasks-axi backlog gate applies, the spawn itself moves the work item to In flight and refuses rather than dispatching work this home has no item for, so recording the dispatch is never a separate step to remember; a manual-backend home retains the hand-editing contract in `docs/configuration.md`.
 After spawning, confirm the worker is processing the brief and handle any trust dialog through `harness-adapters`.
+`fm-spawn` itself waits for a live, brief-receiving pane only on kimi, rovo, agy, and polytoken; for other harnesses it returns after launch delivery, so confirm with one `bin/fm-crew-state.sh <task>` read or the next wake, never a sleep-then-peek loop.
+Settle layout or design direction before dispatching a build; an unsettled direction is a scout or a captain question, not a build steered through revisions.
 A persistent secondmate is recorded in the secondmate registry and runtime state, never as a backlog work item.
 
 Steer a worker with ordinary text through fail-closed `fm-send`: the message becomes a durable record in the task's steering inbox (multi-line text is legal, local and remote alike) and the worker's terminal receives only a constant doorbell line, with the watcher re-ringing an unacknowledged local message and escalating a stuck one (`bin/fm-task-inbox-lib.sh`; `bin/fm-send.sh` owns the typed-plane carve-outs).
@@ -221,6 +225,7 @@ When a steer answers an open keyed decision or blocker, pass `fm-send`'s `--reso
 Drive a worker's lifecycle through `bin/fm-control.sh <task-id> interrupt|exit|relaunch`, which owns the per-runtime mechanics, verifies each action, and never tears down or discards anything ([`docs/agent-control.md`](docs/agent-control.md)).
 A secondmate's routed reply returns through status or a document pointer, not by firstmate peeking into its chat.
 For the parent-owned correlation, recovery, and escalation contract on marked secondmate requests, see `bin/fm-pending-reply-lib.sh`.
+Before steering a ship or scout, and whenever its direction changes, run `bin/fm-context-check.sh <task>`; past the crew context limit (`config/crew-context-limit`, default 250000 tokens) end the session and respawn it with a handoff brief instead of steering, and `fm-send` refuses such a steer unless given `--allow-large-context`.
 When the captain adds or changes an ask mid-task, append the captain's words without added speaker labels or direct address to that brief's `## Captain's intent` and relay those words to the worker; Firstmate build constraints stay in `## Firstmate spec` or the steer.
 Supervise all live work under section 8.
 
@@ -276,6 +281,7 @@ No turn ends blind while work is under way, including turns described as holding
 - After handling all emitted wakes and reconciling the OPEN DECISIONS and UNREAD STATUS sections, run the exact generation-bound `--ack-through` command printed as `WAKE_ACK_REQUIRED`; interruption before that acknowledgement deliberately leaves the work durable for idempotent re-handling.
 - After any supervision-branch acknowledgement succeeds or reports that a sequence is already processed, never acknowledge that sequence again or retry the refusal.
 - A status line is a wake event, not current state; use `bin/fm-crew-state.sh` when current state matters, especially before re-escalating an old decision, blocker, or pause.
+- Read a crewmate report with `bin/fm-report-outline.sh <task>` for its heading list, then at most the two sections the decision needs (`bin/fm-report-outline.sh <task> <heading>...`); never cat a whole report or brief.
 - `bin/fm-classify-lib.sh` owns the distinction between declared `paused:` waits and `blocked:` events needing firstmate action; `bin/fm-brief.sh` owns worker declaration instructions.
 
 Handle actionable wakes as follows:

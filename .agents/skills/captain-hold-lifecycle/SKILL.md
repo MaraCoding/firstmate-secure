@@ -1,7 +1,8 @@
 ---
 name: captain-hold-lifecycle
 description: >-
-  Load before treating an investigation, scout report, structured review, or Lavish review as complete, before ending a visual review that exposed a captain decision, when recording or routing the captain's answer, and on any RECORD DIVERGENCE line the wake drain prints.
+  Load before treating an investigation, scout report, or structured or Lavish review as complete or ending one that exposed a captain decision,
+  when recording or routing the captain's answer, and on any RECORD DIVERGENCE drain line.
 user-invocable: false
 metadata:
   internal: true

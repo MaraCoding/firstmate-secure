@@ -1,8 +1,8 @@
 ---
 name: fmx-respond
 description: >-
-  Relay playbook, loaded only when Relay is enabled.
-  Load on an "x-mention <request_id>", "x-mode-error ...", or "public-followup ..." check wake, on milestone and terminal wakes for a Relay-linked task before posting completion follow-ups, and whenever a promised final public reply must be created, reconciled, or delivered.
+  Relay only: load on an "x-mention <request_id>", "x-mode-error ...", or "public-followup ..." check wake,
+  on milestone or terminal wakes of a Relay-linked task, and when a promised final public reply must be created, reconciled, or delivered.
 user-invocable: false
 metadata:
   internal: true

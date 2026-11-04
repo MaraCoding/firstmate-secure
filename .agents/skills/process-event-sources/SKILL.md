@@ -1,7 +1,8 @@
 ---
 name: process-event-sources
 description: >-
-  Load before arming a long-polling source firstmate owns, before registering a deterministic condition->action watch, on any `procevent <adapter> <source-id> <sequence>` check wake, and on any `process-event source stranded` or `process-event source failed to start` check wake.
+  Load before arming a long-polling source or registering a condition->action watch, and on any `procevent <adapter> <source-id> <sequence>`,
+  `process-event source stranded`, or `process-event source failed to start` check wake.
 user-invocable: false
 metadata:
   internal: true

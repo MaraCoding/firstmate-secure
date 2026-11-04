@@ -1,8 +1,8 @@
 ---
 name: stow
 description: >-
-  Sweep the session for uncaptured durable knowledge and unfiled or wrong open work records, and curate startup memory.
-  Use when the captain invokes /stow (e.g. "/stow", "stow what you've learned"), before a session reset or context compaction, or periodically to keep operational memory current.
+  Capture durable knowledge, fix open work records, and curate startup memory when the captain invokes /stow ("stow what you've learned"),
+  before a session reset or compaction, or periodically.
 user-invocable: true
 metadata:
   internal: true
