@@ -191,7 +191,13 @@
 #   what lets teardown leave a slot reassigned since untouched; bin/fm-wake-lib.sh
 #   owns the claim and bin/fm-teardown.sh owns what it protects. A slot that
 #   cannot be claimed refuses the spawn rather than launching a worker whose slot
-#   could later be released out from under its successor. A spawn that aborts
+#   could later be released out from under its successor. Because the
+#   interactive `treehouse get` lease is a process lease that lapses while a
+#   paused worker's slot runs nothing, the same lock first durably leases (via
+#   `treehouse lease`, state-only) every slot of the project that a live task
+#   record names, and a slot handed out anyway that a live record or claim still
+#   names is refused without touching that claim (bin/fm-wake-lib.sh
+#   fm_treehouse_slot_live_holder). A spawn that aborts
 #   while it still holds the allocation lock drops its own claim; an abort after
 #   metadata publication has released that lock leaves the claim in place, and
 #   the next spawn's claim replaces it. A fresh polytoken spawn that fails and
@@ -3951,6 +3957,42 @@ spawn_endpoint_hint() {
   fi
 }
 
+# Every local Firstmate state directory whose tasks can share this machine's
+# Treehouse pools, own state first; falls back to own state alone when the
+# local-homes walk cannot be completed.
+spawn_local_state_dirs() {
+  SPAWN_LOCAL_STATE_DIRS=("$STATE")
+  if declare -F fm_local_firstmate_state_dirs >/dev/null 2>&1 &&
+    fm_local_firstmate_state_dirs "$STATE" 2>/dev/null; then
+    SPAWN_LOCAL_STATE_DIRS=("${FM_LOCAL_FIRSTMATE_STATES[@]}")
+  fi
+}
+
+# Durably lease, in place, each pool slot of this project that a live task
+# record names, so `treehouse get` cannot hand it out after its interactive
+# process lease lapsed. Runs under the Treehouse project lock that serializes
+# slot allocation and return, so no teardown returns one of these slots in
+# between. A lease failure is only a warning: the post-allocation live-holder
+# check still refuses a double-issued slot.
+spawn_lease_live_pool_slots() {
+  local state meta id wt
+  spawn_local_state_dirs
+  for state in "${SPAWN_LOCAL_STATE_DIRS[@]}"; do
+    [ -d "$state" ] || continue
+    for meta in "$state"/*.meta; do
+      [ -f "$meta" ] && [ ! -L "$meta" ] || continue
+      id=${meta##*/}
+      id=${id%.meta}
+      [ "$id" != "$ID" ] || continue
+      wt=$(fm_treehouse_meta_worktree "$meta")
+      [ -n "$wt" ] && [ -d "$wt" ] || continue
+      fm_treehouse_pool_slot "$PROJ_ABS" "$wt" || continue
+      fm_treehouse_slot_lease "$PROJ_ABS" "$wt" "$id" ||
+        echo "warning: could not durably lease pool slot $wt for live task $id ($FM_TREEHOUSE_LEASE_ERROR); relying on the post-allocation live-holder check" >&2
+    done
+  done
+}
+
 validate_spawn_worktree() { # <source> <inspect-target>
   local source=$1 inspect_target=$2
   if ! spawn_worktree_isolated "$WT"; then
@@ -5135,6 +5177,11 @@ elif [ "$RELAUNCH" -eq 1 ]; then
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+  # Before asking Treehouse for a slot, durably lease every slot of this project
+  # that a live task record still names. The interactive `treehouse get` lease
+  # below is a process lease that lapses whenever nothing runs in the slot, so a
+  # long-paused worker's slot would otherwise read as free and be reset under it.
+  spawn_lease_live_pool_slots
   spawn_send_text_line "$WT_TARGET" 'treehouse get'
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
@@ -5213,6 +5260,15 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # Written under the Treehouse project lock held from before slot allocation
   # through metadata publication, so no other spawn or return sees a half-claim.
   if fm_treehouse_pool_slot "$PROJ_ABS" "$WT"; then
+    # Never claim a slot another live task still holds: Treehouse can hand one
+    # out once its process lease lapsed, and replacing the claim would let this
+    # task's teardown later return the other task's worktree. The fleet's own
+    # records are the authority here, not Treehouse's lease state.
+    spawn_local_state_dirs
+    if fm_treehouse_slot_live_holder "$WT" "$ID" "${SPAWN_LOCAL_STATE_DIRS[@]}"; then
+      echo "error: treehouse get handed task $ID pool slot $WT, but live task $FM_TREEHOUSE_SLOT_HOLDER_ID still holds it ($FM_TREEHOUSE_SLOT_HOLDER_META names that worktree); its Treehouse lease had lapsed. Refusing to launch a second worker in another task's worktree and leaving its slot claim untouched. Check $FM_TREEHOUSE_SLOT_HOLDER_ID's checkout (treehouse get may have reset it to a detached HEAD; its branch is intact) and lease the slot with 'treehouse lease <slot> --lease-holder $FM_TREEHOUSE_SLOT_HOLDER_ID'; $(spawn_endpoint_hint)" >&2
+      exit 1
+    fi
     if ! fm_treehouse_slot_owner_claim "$WT" "$ID" "$FM_HOME"; then
       echo "error: could not claim Treehouse pool slot $WT for task $ID; refusing to launch a worker whose slot cannot later be proved to be its own; $(spawn_endpoint_hint)" >&2
       exit 1
