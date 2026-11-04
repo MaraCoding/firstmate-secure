@@ -1684,6 +1684,120 @@ fm_treehouse_slot_owner_release() {  # <worktree> <task-id>
   rm -f "$marker" 2>/dev/null || true
 }
 
+# The last worktree= value in a task record, or empty.
+fm_treehouse_meta_worktree() {  # <meta>
+  local l v=''
+  while IFS= read -r l || [ -n "$l" ]; do
+    case "$l" in worktree=*) v=${l#worktree=} ;; esac
+  done < "$1" 2>/dev/null || true
+  printf '%s' "$v"
+}
+
+# Live-holder cross-check for a Treehouse pool slot.
+#
+# The interactive `treehouse get` lease is a process lease: it lapses whenever
+# nothing is running under the slot (a worker paused for a day whose pane shell
+# was restarted, a host restart that restored the pane outside the subshell,
+# and so on), and the next `treehouse get` then hands the slot to a new task
+# and resets it to a detached HEAD while the old task's record, branch and
+# unlanded work still live there (teve-evo-content-inventory landed on
+# teve-seamless-world's slot that way). Firstmate's own records are the
+# authority on which task a slot belongs to, so they are checked here: a slot
+# is held by another live task when any task record in <state-dir>... other
+# than <own-id> names it as worktree=, or when its slot-owner claim names a
+# different task whose recorded home still has a task record naming it.
+#
+# Returns 0 and sets FM_TREEHOUSE_SLOT_HOLDER_ID and FM_TREEHOUSE_SLOT_HOLDER_META
+# when such a holder exists; returns 1 otherwise.
+fm_treehouse_slot_live_holder() {  # <worktree> <own-id> <state-dir>...
+  local worktree=$1 own=$2 slot state meta id wt wt_real line
+  shift 2
+  FM_TREEHOUSE_SLOT_HOLDER_ID=
+  FM_TREEHOUSE_SLOT_HOLDER_META=
+  slot=$(CDPATH='' cd -- "$worktree" 2>/dev/null && pwd -P) || return 1
+  for state in "$@"; do
+    [ -d "$state" ] || continue
+    for meta in "$state"/*.meta; do
+      [ -f "$meta" ] && [ ! -L "$meta" ] || continue
+      id=${meta##*/}
+      id=${id%.meta}
+      [ "$id" != "$own" ] || continue
+      wt=$(fm_treehouse_meta_worktree "$meta")
+      [ -n "$wt" ] || continue
+      wt_real=$(CDPATH='' cd -- "$wt" 2>/dev/null && pwd -P) || continue
+      if [ "$wt_real" = "$slot" ]; then
+        # shellcheck disable=SC2034 # Output globals, read by the sourcing caller.
+        FM_TREEHOUSE_SLOT_HOLDER_ID=$id
+        # shellcheck disable=SC2034 # Output globals, read by the sourcing caller.
+        FM_TREEHOUSE_SLOT_HOLDER_META=$meta
+        return 0
+      fi
+    done
+  done
+  # A claim written by a home outside the walked set still counts when that
+  # home's own record for the claimant names this slot.
+  fm_treehouse_slot_owner_state "$worktree" "$own"
+  if [ "$FM_TREEHOUSE_SLOT_OWNER" = other ] && [ -n "$FM_TREEHOUSE_SLOT_OWNER_HOME" ]; then
+    meta="$FM_TREEHOUSE_SLOT_OWNER_HOME/state/$FM_TREEHOUSE_SLOT_OWNER_ID.meta"
+    if [ -f "$meta" ] && [ ! -L "$meta" ]; then
+      wt=$(fm_treehouse_meta_worktree "$meta")
+      line=$(CDPATH='' cd -- "$wt" 2>/dev/null && pwd -P) || line=
+      if [ -n "$wt" ] && [ "$line" = "$slot" ]; then
+        FM_TREEHOUSE_SLOT_HOLDER_ID=$FM_TREEHOUSE_SLOT_OWNER_ID
+        FM_TREEHOUSE_SLOT_HOLDER_META=$meta
+        return 0
+      fi
+    fi
+  fi
+  return 1
+}
+
+# The name `treehouse status` and `treehouse lease` use for a pool slot: the
+# state file's entry whose path is this worktree when jq can read it, else the
+# <slot> directory of the managed <pool>/<slot>/<repo> layout, which is what
+# Treehouse names a slot it placed there.
+fm_treehouse_slot_name() {  # <worktree>
+  local worktree=$1 slot dir pool state name=''
+  slot=$(CDPATH='' cd -- "$worktree" 2>/dev/null && pwd -P) || return 1
+  dir=$(dirname "$slot")
+  pool=$(dirname "$dir")
+  state="$pool/treehouse-state.json"
+  if [ -f "$state" ] && command -v jq >/dev/null 2>&1; then
+    name=$(jq -r --arg a "$worktree" --arg b "$slot" \
+      'first(.worktrees[]? | select(.path == $a or .path == $b) | .name) // empty' \
+      "$state" 2>/dev/null) || name=
+  fi
+  [ -n "$name" ] || name=${dir##*/}
+  [ -n "$name" ] || return 1
+  printf '%s\n' "$name"
+}
+
+# Durably lease a pool slot that already holds a task's live work, in place.
+# `treehouse lease` is state-only (no reset, fetch, clean or checkout), so it is
+# safe on a slot whose worker is running or paused, and a leased slot is never
+# handed out by a later `treehouse get` nor pruned until `treehouse return`,
+# which bin/fm-teardown.sh already runs. A slot that is already leased is left
+# as it is and counts as success. Treehouse resolves the pool from the working
+# directory, so it runs from the project. Sets FM_TREEHOUSE_LEASE_ERROR on
+# failure.
+fm_treehouse_slot_lease() {  # <project-dir> <worktree> <holder>
+  local project=$1 worktree=$2 holder=$3 out name
+  FM_TREEHOUSE_LEASE_ERROR=
+  name=$(fm_treehouse_slot_name "$worktree") || {
+    FM_TREEHOUSE_LEASE_ERROR="cannot resolve the pool slot name of $worktree"
+    return 1
+  }
+  if out=$( (CDPATH='' cd -- "$project" && treehouse lease "$name" --lease-holder "$holder") 2>&1 ); then
+    return 0
+  fi
+  case "$out" in
+    *"already leased"*) return 0 ;;
+  esac
+  # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
+  FM_TREEHOUSE_LEASE_ERROR=$(printf '%s' "$out" | tr '\n' ' ')
+  return 1
+}
+
 fm_failure_episode_reset() {
   local state=$1 mode=${2:-acquire} lock current pid acquired=0 path
   lock="$state/.turnend-claude-blocks.lock"
