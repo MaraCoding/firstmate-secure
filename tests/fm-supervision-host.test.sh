@@ -26,6 +26,11 @@ command -v node >/dev/null 2>&1 || { printf 'skip: node absent\n'; exit 0; }
 command -v perl >/dev/null 2>&1 || { printf 'skip: perl absent\n'; exit 0; }
 
 TMP_ROOT=$(fm_test_tmproot fm-supervision-host)
+# The real Claude Stop hook these host+hook cases run applies its wake policy
+# (coalescing, cold-wake hold, auto-ack) before a rewake; that policy has its
+# own cases in tests/fm-claude-stop-autoarm.test.sh, so pin it off here and
+# keep these cases on the host hand-back contract.
+export FM_CLAUDE_AUTOARM_AUTOACK=0 FM_CLAUDE_AUTOARM_COALESCE_SECS=0 FM_CLAUDE_AUTOARM_CACHE_TTL_SECS=0
 FAKEBIN=$(fm_fakebin "$TMP_ROOT/fakebin")
 ln -s /bin/bash "$FAKEBIN/claude"
 FAKE_CLAUDE="$FAKEBIN/claude"

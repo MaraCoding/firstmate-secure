@@ -11,7 +11,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | Task windows and worker tools | [Runtime backend](#runtime-backend-configbackend--fm_backend) and [harness support](#harness-support) |
 | Worker permissions, accounts, or environment | [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [worker tool exclusions](#worker-tool-exclusions-configcrew-exclude-tools), [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist), and its [Orca environment source](#orca-environment-source-configlaunch-env-tmux-session) |
 | Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), [external memory tiers](#external-memory-tiers-memory-layering-section), and [startup memory budget](#startup-memory-budget-configstartup-memory-budget) |
-| Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), and [Calm preference](#calm-preference-configcalm) |
+| Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), [Claude wake policy](#claude-wake-policy-configclaude-wake-policy), and [Calm preference](#calm-preference-configcalm) |
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
 | Per-run overrides and tuning | [Environment variables](#environment-variables) |
 
@@ -337,6 +337,27 @@ The opt-out is inherited into secondmate homes: a primary that opts out also opt
 The primary-authoritative propagation contract, including removal of a mate's local opt-out when the primary has none, is owned by [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md).
 `config/supervision-host` is local to each home and not inherited, because each home's engine and model are its own choice.
 While the home runs the host, main's lease-checked commands also take the per-task lease lock, so a claim by the host's engine cannot race a mutation main already started (`bin/fm-lease-lib.sh`).
+
+## Claude wake policy (config/claude-wake-policy)
+
+The Claude Stop hook (`bin/fm-claude-stop-autoarm.sh`) applies three bounded policies between a watcher or supervision-host close and the rewake it delivers, so a Claude primary is not woken for events that need nothing from it.
+Each knob is an environment variable, or a `<key>=<seconds>` line in the optional local, gitignored `config/claude-wake-policy`; the environment wins, and a missing or non-numeric value uses the default.
+
+| Environment variable | `config/claude-wake-policy` key | Default | Effect |
+| --- | --- | --- | --- |
+| `FM_CLAUDE_AUTOARM_AUTOACK` | `autoack` | `1` | `0` turns host-side auto-ack off |
+| `FM_CLAUDE_AUTOARM_COALESCE_SECS` | `coalesce-secs` | `60` | window in which further closes join the same wake; `0` turns coalescing off |
+| `FM_CLAUDE_AUTOARM_CACHE_TTL_SECS` | `cache-ttl-secs` | `3300` (55 min) | idle time after which a wake counts as cold; `0` turns the cold-wake hold off |
+| `FM_CLAUDE_AUTOARM_COLD_HOLD_MAX_SECS` | `cold-hold-max-secs` | `10800` (3 h) | longest a cold wake is held; `0` turns the hold off |
+| `FM_CLAUDE_AUTOARM_PARK_BUDGET_SECS` | `park-budget-secs` | `27000` | total seconds one hook run may keep parking after an auto-ack, a coalesce, or a hold; kept below the 28800-second hook timeout |
+
+- **Auto-ack.** When every pending event, both the close's wake lines and every durable wake-queue row, is a declared-pause recheck (the watcher's long-cadence `stale: ... (paused Ns, awaiting external - ...; confirm the wait still holds)`), the hook acknowledges the queue through `bin/fm-wake-drain.sh --ack-through` itself and parks again in the same generation instead of waking the model. Each acknowledged event is appended to `state/.claude-autoarm-autoacked.log`, and the next delivered wake carries one line counting them. A live branch grant, an away or quiet record, any other row, or a failed acknowledgement leaves the batch to the ordinary wake.
+- **Coalescing.** Any other close waits up to the coalesce window on a further cycle, so events seconds apart reach the model as one wake. Session activity ends the window early.
+- **Cold-wake hold.** When the primary has been idle past the cache TTL (measured from the Stop that started the hook or the latest transcript write) and nothing pending is a decision, the wake is held on further cycles until a batch with a new event arrives, the session shows activity (a captain prompt writes the transcript), or the hold limit or park budget passes. A decision is any check, heartbeat, captain-relevant or no-verb status signal, blocker, failure, escalation, captain hold, or supervision-host line about outcomes, the captain, or a failure; only the long-cadence rechecks and `working`/`progress`/`note`-style status signals are held.
+
+A supervision-host cycle boundary is never auto-acked, held, or coalesced: it is how the Stop chain re-arms before Claude's hook timeout.
+The park budget bounds re-parks only; the first park of a hook run is unchanged.
+The away daemon, AFK, and every failure path behave exactly as without the policy.
 
 ## Backlog backend (.tasks.toml / config/backlog-backend)
 
@@ -2758,6 +2779,11 @@ FM_PF_RETRY_BACKOFF_SECS=900   # seconds before the next attempt after a retryab
 FM_LOCK_STALE_AFTER=2   # grace seconds for missing or nonnumeric lock-owner PIDs (minimum 2s); dead numeric PIDs have no age grace
 FM_GUARD_GRACE=300      # beacon freshness threshold for guard verdicts, arm health checks, and the primary turn-end guard; see docs/turnend-guard.md for model-aware exceptions
 FM_CLAUDE_AUTOARM_ATTEMPTS=2   # bounded Stop-owned arm attempts per Claude auto-arm cycle; accepted values are 1, 2, or 3
+FM_CLAUDE_AUTOARM_AUTOACK=1   # 0 turns off host-side auto-ack of declared-pause rechecks; see "Claude wake policy"
+FM_CLAUDE_AUTOARM_COALESCE_SECS=60   # seconds further closes may join one Claude rewake; 0 turns coalescing off
+FM_CLAUDE_AUTOARM_CACHE_TTL_SECS=3300   # idle seconds after which a decision-free Claude wake is held as cold; 0 turns the hold off
+FM_CLAUDE_AUTOARM_COLD_HOLD_MAX_SECS=10800   # longest a cold Claude wake is held before it is delivered anyway
+FM_CLAUDE_AUTOARM_PARK_BUDGET_SECS=27000   # seconds one Stop-hook run may keep re-parking; below the 28800-second hook timeout
 FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=800   # milliseconds the --claude turn-end guard waits for watcher health, an open Stop auto-arm generation claim, or a fresh epoch before deciding recovery ownership or failure progression
 FM_CLAUDE_AUTOARM_EPOCH_FRESH=15   # seconds a recorded auto-arm outcome remains eligible for the current event epoch's recovery or failure decision
 FM_CLAUDE_TURNEND_BLOCK_BUDGET=3   # consecutive --claude guard re-blocks before the verified one-time attended fail-open; safely below Claude Code's 8-block override

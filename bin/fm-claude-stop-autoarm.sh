@@ -92,6 +92,12 @@
 #     last-resort notice per failure episode; later consecutive failures still
 #     exit 2 to guarantee the next Stop-owned retry without repeating notice,
 #     until the synchronous guard has consumed its attended fail-open.
+#   - Wake policy: between an actionable close and its rewake, a batch of
+#     declared-pause rechecks is acknowledged host-side and re-parked, a warm
+#     wake is coalesced with closes inside a short window, and a cold
+#     decision-free wake is held (docs/configuration.md "Claude wake policy"
+#     owns the knobs; the block above park_until_close owns the rules). A
+#     delivered wake keeps the banner and exit-2 contract below.
 #
 # The epoch ledger state/.claude-autoarm-epoch records the latest claim
 # generation and outcome, and binds rewake outcomes to the session-lock pid and
@@ -394,6 +400,379 @@ start_handling_successor() {  # <closed-arm-pid>
   return 1
 }
 
+# --- wake policy: host-side auto-ack, coalescing, cold-wake hold -------------
+# Every wake this hook delivers is a full model turn on the primary, and a
+# wake that lands after the prompt cache expired re-writes the whole context.
+# Three bounded policies sit between an actionable close and the rewake
+# (docs/configuration.md "Claude wake policy" owns the knobs and defaults):
+#   - auto-ack: a batch whose every pending event is a declared-pause recheck
+#     (the watcher's long-cadence "confirm the wait still holds" stale) needs
+#     no decision, so this hook acknowledges it through bin/fm-wake-drain.sh's
+#     own --ack-through path, records it in state/.claude-autoarm-autoacked.log
+#     plus a pending digest the next delivered banner names in one line, and
+#     parks again inside this same generation instead of waking the model.
+#   - coalesce: any other close waits up to the coalesce window for further
+#     closes, so events seconds apart become one wake.
+#   - cold-wake hold: when the primary has been idle past the prompt-cache TTL
+#     and nothing pending is a decision (no captain-relevant signal, blocker,
+#     failure, check, heartbeat, or outcome to relay), the wake is held until a
+#     further decision-bearing batch arrives, the session shows activity (a
+#     captain prompt writes the transcript), or the hold limit passes.
+# A park-budget clock below Claude's hook timeout bounds every re-park, and a
+# host cycle boundary is never acknowledged or held: it is the only way the
+# Stop chain re-arms once the hook nears that timeout.
+HOOK_STARTED=$(date +%s)
+
+# <env-name> <config-key> <default>: the env value, else the last valid
+# "<key>=<digits>" line of config/claude-wake-policy, else the default.
+wake_policy_knob() {
+  local name=$1 key=$2 def=$3 val
+  val=${!name:-}
+  if [ -z "$val" ] && [ -f "$CONFIG/claude-wake-policy" ]; then
+    val=$(sed -n "s/^[[:space:]]*${key}[[:space:]]*=[[:space:]]*\([0-9][0-9]*\)[[:space:]]*\$/\1/p" \
+      "$CONFIG/claude-wake-policy" 2>/dev/null | tail -n 1)
+  fi
+  case "$val" in ''|*[!0-9]*) val=$def ;; esac
+  printf '%s\n' "$val"
+}
+POLICY_AUTOACK=$(wake_policy_knob FM_CLAUDE_AUTOARM_AUTOACK autoack 1)
+POLICY_COALESCE=$(wake_policy_knob FM_CLAUDE_AUTOARM_COALESCE_SECS coalesce-secs 60)
+POLICY_CACHE_TTL=$(wake_policy_knob FM_CLAUDE_AUTOARM_CACHE_TTL_SECS cache-ttl-secs 3300)
+POLICY_HOLD_MAX=$(wake_policy_knob FM_CLAUDE_AUTOARM_COLD_HOLD_MAX_SECS cold-hold-max-secs 10800)
+POLICY_PARK_BUDGET=$(wake_policy_knob FM_CLAUDE_AUTOARM_PARK_BUDGET_SECS park-budget-secs 27000)
+[ "$POLICY_PARK_BUDGET" -gt 0 ] && [ "$POLICY_PARK_BUDGET" -lt 28800 ] || POLICY_PARK_BUDGET=27000
+BUDGET_DEADLINE=$((HOOK_STARTED + POLICY_PARK_BUDGET))
+# A re-park needs at least this much budget left to be worth starting.
+POLICY_MIN_REPARK=300
+REPARKED=0
+AUTOACK_PENDING="$STATE/.claude-autoarm-autoacked"
+AUTOACK_LOG="$STATE/.claude-autoarm-autoacked.log"
+POLICY_NOTE=
+
+TRANSCRIPT=
+if [ -n "$PAYLOAD" ] && command -v jq >/dev/null 2>&1; then
+  TRANSCRIPT=$(printf '%s' "$PAYLOAD" | jq -r '.transcript_path // empty | strings' 2>/dev/null || true)
+fi
+[ -z "$TRANSCRIPT" ] || [ -f "$TRANSCRIPT" ] || TRANSCRIPT=
+
+# Last sign of model or captain activity: the Stop that started this hook,
+# or a later transcript write.
+last_activity() {
+  local t=$HOOK_STARTED m
+  if [ -n "$TRANSCRIPT" ]; then
+    m=$(fm_path_mtime "$TRANSCRIPT" 2>/dev/null || true)
+    case "$m" in ''|*[!0-9]*) ;; *) [ "$m" -le "$t" ] || t=$m ;; esac
+  fi
+  printf '%s\n' "$t"
+}
+
+WAKE_LINE_RE='^(signal:|stale:|check:|heartbeat($|:)|supervision-host:)'
+PAUSE_RECHECK_RE='^stale: .* \(paused [0-9]+s, awaiting external - (declared pause, rechecked on a long cadence not a wedge|the declared time is beyond the recheck cadence); confirm the wait still holds\)$'
+DECISION_WORDS_RE='captain|escalation|wedged|demand-deep-inspection|blocked|block|needs-decision|decision|waiting on human|unread firstmate instruction|dead|no agent|fail|error|question|unwritable|stuck|done|landed|merged|ready|review'
+
+# One wake line's class: ack (a declared-pause recheck, safe to acknowledge
+# unseen), neutral (carries no event of its own), boundary (the host park
+# boundary), routine (an event with no decision), or decision.
+wake_line_class() {
+  local l=$1
+  case "$l" in
+    'check: rearm-resurface') echo neutral; return ;;
+    'supervision-host: cycle boundary'*) echo boundary; return ;;
+  esac
+  if [[ "$l" =~ $PAUSE_RECHECK_RE ]]; then echo ack; return; fi
+  case "$l" in
+    supervision-host:*)
+      if printf '%s' "$l" | grep -Eqi 'captain|relay|verif|outcome|restored|fail|error|lookup'; then
+        echo decision
+      elif [[ "$l" == *'this wake is yours'* ]]; then
+        echo neutral
+      else
+        echo decision
+      fi
+      ;;
+    stale:*)
+      if [[ "$l" == *'rechecked on a long cadence not a wedge'* ]] \
+        && ! printf '%s' "$l" | grep -Eqi "$DECISION_WORDS_RE"; then
+        echo routine
+      else
+        echo decision
+      fi
+      ;;
+    signal:*)
+      if printf '%s' "$l" | grep -Eq '^signal: [^ ]+ (working|progress|note|info|started|update)(:| |$)' \
+        && ! printf '%s' "$l" | grep -Eqi "$DECISION_WORDS_RE"; then
+        echo routine
+      else
+        echo decision
+      fi
+      ;;
+    *) echo decision ;;
+  esac
+}
+
+# Classify the wake lines of <file> plus every durable queue row.
+# BATCH_CLASS is boundary, decision, ack (every event auto-ackable), routine,
+# or neutral (no event at all). QUEUE_CUTOFF is the highest queued sequence and
+# QUEUE_PAYLOADS the queued payloads, oldest first.
+BATCH_CLASS=
+QUEUE_CUTOFF=0
+QUEUE_PAYLOADS=
+classify_batch() {  # <file>
+  local line c seq kind payload events=0 routine=0 decision=0 boundary=0
+  QUEUE_CUTOFF=0
+  QUEUE_PAYLOADS=
+  if [ -n "$1" ] && [ -f "$1" ]; then
+    while IFS= read -r line; do
+      [[ "$line" =~ $WAKE_LINE_RE ]] || continue
+      c=$(wake_line_class "$line")
+      case "$c" in
+        ack) events=$((events + 1)) ;;
+        routine) routine=1; events=$((events + 1)) ;;
+        boundary) boundary=1 ;;
+        neutral) ;;
+        *) decision=1 ;;
+      esac
+    done < "$1"
+  fi
+  # A live branch grant reserves rows main may not acknowledge: leave them to
+  # the model rather than reasoning about the partition here.
+  if [ -e "$STATE/.branch-eligible-rows" ] || [ -L "$STATE/.branch-eligible-rows" ]; then
+    decision=1
+  fi
+  if [ -s "$FM_WAKE_QUEUE" ]; then
+    while IFS=$'\t' read -r _ seq kind _ payload; do
+      case "$seq" in ''|*[!0-9]*) decision=1; continue ;; esac
+      [ -n "$payload" ] || { decision=1; continue; }
+      [ "$seq" -le "$QUEUE_CUTOFF" ] || QUEUE_CUTOFF=$seq
+      QUEUE_PAYLOADS="$QUEUE_PAYLOADS$payload"$'\n'
+      case "$kind" in signal|stale|check|heartbeat) ;; *) decision=1; continue ;; esac
+      c=$(wake_line_class "$payload")
+      case "$c" in
+        ack) events=$((events + 1)) ;;
+        routine) routine=1; events=$((events + 1)) ;;
+        neutral) ;;
+        *) decision=1 ;;
+      esac
+    done < "$FM_WAKE_QUEUE"
+  fi
+  if [ "$boundary" -eq 1 ]; then BATCH_CLASS=boundary
+  elif [ "$decision" -eq 1 ]; then BATCH_CLASS=decision
+  elif [ "$events" -eq 0 ]; then BATCH_CLASS=neutral
+  elif [ "$routine" -eq 0 ]; then BATCH_CLASS=ack
+  else BATCH_CLASS=routine
+  fi
+}
+
+# Acknowledge the current batch host-side when every pending event is
+# auto-ackable. 0 when the queue was consumed through its cutoff and the
+# digest recorded; 1 leaves everything for the ordinary wake.
+autoack_batch() {  # <file>
+  local gen out now payloads line
+  [ "$POLICY_AUTOACK" -ne 0 ] || return 1
+  [ $((BUDGET_DEADLINE - $(date +%s))) -ge "$POLICY_MIN_REPARK" ] || return 1
+  [ ! -e "$STATE/.afk-contract" ] || return 1
+  classify_batch "$1"
+  [ "$BATCH_CLASS" = ack ] || return 1
+  fm_recovery_marker_snapshot "$STATE/.watcher-down" || return 1
+  case "$FM_RECOVERY_MARKER_TOKEN" in
+    pending:*|announced:*) gen=${FM_RECOVERY_MARKER_TOKEN##*:} ;;
+    *) return 1 ;;
+  esac
+  case "$gen" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  fm_autoarm_still_owner "$STATE" "$MY_GEN" || return 1
+  payloads=$QUEUE_PAYLOADS
+  [ -n "$payloads" ] || payloads=$(grep -E "$WAKE_LINE_RE" "$1" 2>/dev/null | grep -v '^supervision-host:')
+  out=$(FM_SUPERVISION_ACTOR=main "$SCRIPT_DIR/fm-wake-drain.sh" --ack-through "$QUEUE_CUTOFF" \
+    --recovery-generation "$gen" 2>&1) || return 1
+  case "$out" in *'nothing was acknowledged'*) return 1 ;; esac
+  if [ -s "$FM_WAKE_QUEUE" ] && awk -F '\t' -v c="$QUEUE_CUTOFF" \
+    'NF >= 5 && $2 ~ /^[0-9]+$/ && $2 + 0 <= c + 0 { found = 1 } END { exit found ? 0 : 1 }' "$FM_WAKE_QUEUE"; then
+    return 1
+  fi
+  now=$(date +%s)
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    printf '%s\t%s\n' "$now" "$line" >> "$AUTOACK_PENDING" 2>/dev/null || true
+    printf '%s\t%s\n' "$now" "$line" >> "$AUTOACK_LOG" 2>/dev/null || true
+  done <<ROWS
+$payloads
+ROWS
+  if [ "$(awk 'END { print NR }' "$AUTOACK_LOG" 2>/dev/null || echo 0)" -gt 1000 ]; then
+    tail -n 500 "$AUTOACK_LOG" > "$AUTOACK_LOG.tmp.$$" 2>/dev/null \
+      && mv -f "$AUTOACK_LOG.tmp.$$" "$AUTOACK_LOG" 2>/dev/null || rm -f "$AUTOACK_LOG.tmp.$$" 2>/dev/null || true
+  fi
+  return 0
+}
+
+# The one-line digest of events auto-acked since the last delivered wake.
+autoack_digest_line() {
+  local n latest
+  [ -s "$AUTOACK_PENDING" ] || return 0
+  n=$(awk 'END { print NR }' "$AUTOACK_PENDING" 2>/dev/null || echo 0)
+  latest=$(tail -n 1 "$AUTOACK_PENDING" 2>/dev/null | cut -f2- | cut -c1-200)
+  printf 'Auto-acknowledged by this Stop hook since your last wake, no action needed: %s declared-pause recheck(s), latest "%s"; record in state/.claude-autoarm-autoacked.log.\n' "$n" "$latest"
+}
+
+# Run one more cycle until it closes, <deadline> passes, or the session shows
+# activity; append its wake lines to OUT. <budget-bound> 1 means the deadline
+# is the park budget, so a host boundary there is real and kept. Sets
+# COLLECT_END (closed, deadline, activity, ended) and COLLECT_CLASS (the class
+# of the lines it added).
+COLLECT_END=
+COLLECT_CLASS=
+collect_cycle() {  # <deadline> <budget-bound>
+  local deadline=$1 budget_bound=$2 out now since rc=0 park lines
+  COLLECT_END=
+  COLLECT_CLASS=
+  now=$(date +%s)
+  if [ "$now" -ge "$deadline" ]; then COLLECT_END=deadline; return 0; fi
+  if ! fm_autoarm_still_owner "$STATE" "$MY_GEN"; then
+    [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
+    exit 0
+  fi
+  out=$(mktemp "$STATE/.claude-autoarm-collect.XXXXXX") || { COLLECT_END=ended; return 0; }
+  since=$(last_activity)
+  if [ "$HOST_MODE" -eq 1 ]; then
+    park=$((deadline - now))
+    [ "$park" -ge 1 ] || park=1
+    # The pending batch is still unacknowledged, so the host's first cycle
+    # runs as a handling successor (a predecessor pid, here this hook's own,
+    # which names no ledger row) and does not re-surface that batch.
+    FM_WATCH_PREDECESSOR_ARM_PID=$$ FM_SUPERVISION_HOST_PARK_SECONDS=$park \
+      FM_SUPERVISION_HOST_AUTOARM_GEN=$MY_GEN FM_SUPERVISION_HOST_OWNER_PID=$$ \
+      FM_SUPERVISION_HOST_PRIMARY=claude FM_GUARD_GRACE="$GRACE" \
+      "$SCRIPT_DIR/fm-supervision-host.sh" park >"$out" 2>&1 &
+  else
+    FM_WATCH_PREDECESSOR_ARM_PID=${CLOSED_ARM_PID:-$$} FM_GUARD_GRACE="$GRACE" \
+      "$SCRIPT_DIR/fm-watch-arm.sh" >"$out" 2>&1 &
+  fi
+  ARM_PID=$!
+  while kill -0 "$ARM_PID" 2>/dev/null; do
+    sleep 1
+    kill -0 "$ARM_PID" 2>/dev/null || break
+    now=$(date +%s)
+    if [ "$(last_activity)" -gt "$since" ]; then
+      COLLECT_END=activity
+    elif [ "$HOST_MODE" -eq 0 ] && [ "$now" -ge "$deadline" ]; then
+      COLLECT_END=deadline
+    elif [ "$now" -ge $((deadline + 120)) ]; then
+      # A host that outlived its own park boundary.
+      COLLECT_END=deadline
+    else
+      continue
+    fi
+    kill -TERM "$ARM_PID" 2>/dev/null || true
+    break
+  done
+  wait "$ARM_PID" 2>/dev/null || rc=$?
+  [ "$HOST_MODE" -eq 1 ] || CLOSED_ARM_PID=$ARM_PID
+  ARM_PID=
+  if [ -e "$STATE/.afk" ]; then
+    autoarm_record afk
+    rm -f "$out" "$OUT" 2>/dev/null || true
+    exit 0
+  fi
+  if [ "$HOST_MODE" -eq 1 ] && grep -q '^supervision-host stood down:' "$out" 2>/dev/null; then
+    autoarm_record clean
+    rm -f "$out" "$OUT" 2>/dev/null || true
+    exit 0
+  fi
+  lines=$(grep -E "$WAKE_LINE_RE" "$out" 2>/dev/null || true)
+  if [ "$budget_bound" -ne 1 ]; then
+    lines=$(printf '%s\n' "$lines" | grep -v '^supervision-host: cycle boundary' || true)
+  fi
+  rm -f "$out" 2>/dev/null || true
+  if [ -n "$lines" ]; then
+    printf '%s\n' "$lines" >> "$OUT"
+    printf '%s\n' "$lines" > "$OUT.collect"
+    classify_lines_only "$OUT.collect"
+    rm -f "$OUT.collect" 2>/dev/null || true
+    [ -n "$COLLECT_END" ] || COLLECT_END=closed
+  elif [ -z "$COLLECT_END" ]; then
+    if [ "$(date +%s)" -ge "$deadline" ]; then COLLECT_END=deadline; else COLLECT_END=ended; fi
+  fi
+  : "$rc"
+  return 0
+}
+
+# COLLECT_CLASS for the lines one collect cycle added (queue rows excluded).
+classify_lines_only() {  # <file>
+  local line c cls=neutral
+  while IFS= read -r line; do
+    c=$(wake_line_class "$line")
+    case "$c" in
+      boundary) cls=boundary; break ;;
+      decision) cls=decision ;;
+      routine) [ "$cls" = decision ] || cls=routine ;;
+      ack) [ "$cls" != neutral ] || cls=ack ;;
+    esac
+  done < "$1"
+  COLLECT_CLASS=$cls
+}
+
+# Hold a cold, decision-free wake or coalesce a warm one before it is
+# delivered. Leaves OUT carrying every collected wake line and POLICY_NOTE the
+# banner line explaining a hold.
+hold_or_coalesce() {
+  local now idle deadline bound held_since why streak
+  [ -n "$OUT" ] || return 0
+  classify_batch "$OUT"
+  [ "$BATCH_CLASS" != boundary ] || return 0
+  now=$(date +%s)
+  idle=$((now - $(last_activity)))
+  if [ "$BATCH_CLASS" != decision ] && [ "$POLICY_CACHE_TTL" -gt 0 ] && [ "$POLICY_HOLD_MAX" -gt 0 ] \
+    && [ "$idle" -ge "$POLICY_CACHE_TTL" ] && [ ! -e "$STATE/.afk-contract" ]; then
+    deadline=$((now + POLICY_HOLD_MAX))
+    bound=0
+    if [ "$deadline" -ge "$BUDGET_DEADLINE" ]; then deadline=$BUDGET_DEADLINE; bound=1; fi
+    held_since=$now
+    why='the hold limit'
+    streak=0
+    while :; do
+      collect_cycle "$deadline" "$bound"
+      case "$COLLECT_END" in
+        activity) why='activity in the session'; break ;;
+        closed)
+          case "$COLLECT_CLASS" in
+            neutral|ack)
+              # Nothing new that needs the model: keep holding, but a cycle
+              # that keeps closing with no event must not spin.
+              if [ "$COLLECT_CLASS" = neutral ]; then streak=$((streak + 1)); else streak=0; fi
+              if [ "$streak" -ge 3 ]; then why='repeated empty supervision cycles'; break; fi
+              sleep 1
+              continue
+              ;;
+            *) why='a second event batch'; break ;;
+          esac
+          ;;
+        deadline) [ "$bound" -eq 0 ] || why='the park budget'; break ;;
+        *) why='an ended supervision cycle'; break ;;
+      esac
+    done
+    POLICY_NOTE="This wake was held $(( $(date +%s) - held_since ))s: you had been idle ${idle}s, past the ${POLICY_CACHE_TTL}s prompt-cache window, and nothing pending needed a decision; it was released by $why."
+    return 0
+  fi
+  [ "$POLICY_COALESCE" -gt 0 ] || return 0
+  deadline=$((now + POLICY_COALESCE))
+  bound=0
+  if [ "$deadline" -ge "$BUDGET_DEADLINE" ]; then deadline=$BUDGET_DEADLINE; bound=1; fi
+  streak=0
+  while :; do
+    collect_cycle "$deadline" "$bound"
+    case "$COLLECT_END" in
+      closed)
+        [ "$COLLECT_CLASS" != boundary ] || break
+        [ "$(date +%s)" -lt "$deadline" ] || break
+        if [ "$COLLECT_CLASS" = neutral ]; then streak=$((streak + 1)); else streak=0; fi
+        [ "$streak" -lt 3 ] || break
+        sleep 1
+        ;;
+      *) break ;;
+    esac
+  done
+  return 0
+}
+
 OUT=
 ACTIONABLE=0
 HEALTHY=0
@@ -405,70 +784,100 @@ if fm_supervision_host_enabled "$CONFIG" claude; then
   HOST_MODE=1
   ACTIONABLE_RE='^(signal:|stale:|check:|heartbeat($|:)|supervision-host:)'
 fi
-attempt=0
-while [ "$attempt" -lt "$AUTOARM_ATTEMPTS" ]; do
-  # A superseded owner must not start or attach another watcher or mutate any
-  # watcher/wake state: re-verify generation ownership before every arm
-  # invocation, first attempt and retries alike.
-  if ! fm_autoarm_still_owner "$STATE" "$MY_GEN"; then
-    [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
-    exit 0
-  fi
-  attempt=$((attempt + 1))
-  OUT=$(mktemp "$STATE/.claude-autoarm-output.XXXXXX") || OUT=
-  if [ "$HOST_MODE" -eq 1 ]; then
-    HOST_RC=0
-    FM_SUPERVISION_HOST_AUTOARM_GEN=$MY_GEN FM_SUPERVISION_HOST_OWNER_PID=$$ \
-      FM_SUPERVISION_HOST_PRIMARY=claude FM_GUARD_GRACE="$GRACE" \
-      "$SCRIPT_DIR/fm-supervision-host.sh" park >"${OUT:-/dev/null}" 2>&1 || HOST_RC=$?
-  else
-    run_arm "$OUT"
-  fi
-
-  # AFK may have appeared mid-cycle: the daemon owns triage now, so suppress
-  # every subsequent classification and handoff.
-  if [ -e "$STATE/.afk" ]; then
-    autoarm_record afk
-    [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
-    exit 0
-  fi
-
+# Park until a close: the bounded attempt loop below, run once per park. After
+# a host-side auto-ack the same generation parks again (wake policy above).
+park_until_close() {
+  local host_park
+  attempt=0
   ACTIONABLE=0
-  if [ -n "$OUT" ]; then
-    grep -Eq "$ACTIONABLE_RE" "$OUT" 2>/dev/null && ACTIONABLE=1
-  fi
-  [ "$ACTIONABLE" -eq 1 ] && break
-  if [ "$HOST_MODE" -eq 1 ]; then
-    # The host stood down because this session or generation no longer owns
-    # supervision: whoever does owns continuity now.
-    if [ -n "$OUT" ] && grep -q '^supervision-host stood down:' "$OUT" 2>/dev/null; then
-      autoarm_record clean
-      rm -f "$OUT" 2>/dev/null || true
+  HEALTHY=0
+  while [ "$attempt" -lt "$AUTOARM_ATTEMPTS" ]; do
+    # A superseded owner must not start or attach another watcher or mutate any
+    # watcher/wake state: re-verify generation ownership before every arm
+    # invocation, first attempt and retries alike.
+    if ! fm_autoarm_still_owner "$STATE" "$MY_GEN"; then
+      [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
       exit 0
     fi
-    # A host that died without a close may have left its cycle running with
-    # no owner to deliver the close; retrying lets the next host stop what it
-    # left and own a fresh cycle, which the healthy-watcher predicate cannot.
-    if [ "$HOST_RC" -gt 128 ] || [ -z "$OUT" ] || [ ! -s "$OUT" ]; then
-      [ "$attempt" -lt "$AUTOARM_ATTEMPTS" ] || break
-      [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
-      OUT=
-      continue
+    attempt=$((attempt + 1))
+    OUT=$(mktemp "$STATE/.claude-autoarm-output.XXXXXX") || OUT=
+    if [ "$HOST_MODE" -eq 1 ]; then
+      HOST_RC=0
+      # A re-park inside this generation keeps the host's own boundary inside
+      # the hook's park budget; the first park is unchanged.
+      host_park=$((BUDGET_DEADLINE - $(date +%s)))
+      if [ "$REPARKED" -eq 1 ] && [ "$host_park" -lt "${FM_SUPERVISION_HOST_PARK_SECONDS:-27000}" ] 2>/dev/null; then
+        [ "$host_park" -ge 1 ] || host_park=1
+        FM_SUPERVISION_HOST_PARK_SECONDS=$host_park FM_SUPERVISION_HOST_AUTOARM_GEN=$MY_GEN FM_SUPERVISION_HOST_OWNER_PID=$$ \
+          FM_SUPERVISION_HOST_PRIMARY=claude FM_GUARD_GRACE="$GRACE" \
+          "$SCRIPT_DIR/fm-supervision-host.sh" park >"${OUT:-/dev/null}" 2>&1 || HOST_RC=$?
+      else
+        FM_SUPERVISION_HOST_AUTOARM_GEN=$MY_GEN FM_SUPERVISION_HOST_OWNER_PID=$$ \
+          FM_SUPERVISION_HOST_PRIMARY=claude FM_GUARD_GRACE="$GRACE" \
+          "$SCRIPT_DIR/fm-supervision-host.sh" park >"${OUT:-/dev/null}" 2>&1 || HOST_RC=$?
+      fi
+    else
+      run_arm "$OUT"
     fi
-    # A failed hand-back cannot be dismissed just because its successor
-    # watcher is healthy: the close is still undelivered.
-    [ "$HOST_RC" -eq 0 ] || break
-  fi
 
-  # A non-actionable close is benign when another verified watcher already owns
-  # this home and is still beating within the shared grace window.
-  if fm_watcher_healthy "$STATE" "$SCRIPT_DIR/fm-watch.sh" "$GRACE" "$FM_HOME"; then
-    HEALTHY=1
-    break
-  fi
-  [ "$attempt" -lt "$AUTOARM_ATTEMPTS" ] || break
+    # AFK may have appeared mid-cycle: the daemon owns triage now, so suppress
+    # every subsequent classification and handoff.
+    if [ -e "$STATE/.afk" ]; then
+      autoarm_record afk
+      [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
+      exit 0
+    fi
+
+    ACTIONABLE=0
+    if [ -n "$OUT" ]; then
+      grep -Eq "$ACTIONABLE_RE" "$OUT" 2>/dev/null && ACTIONABLE=1
+    fi
+    [ "$ACTIONABLE" -eq 1 ] && break
+    if [ "$HOST_MODE" -eq 1 ]; then
+      # The host stood down because this session or generation no longer owns
+      # supervision: whoever does owns continuity now.
+      if [ -n "$OUT" ] && grep -q '^supervision-host stood down:' "$OUT" 2>/dev/null; then
+        autoarm_record clean
+        rm -f "$OUT" 2>/dev/null || true
+        exit 0
+      fi
+      # A host that died without a close may have left its cycle running with
+      # no owner to deliver the close; retrying lets the next host stop what it
+      # left and own a fresh cycle, which the healthy-watcher predicate cannot.
+      if [ "$HOST_RC" -gt 128 ] || [ -z "$OUT" ] || [ ! -s "$OUT" ]; then
+        [ "$attempt" -lt "$AUTOARM_ATTEMPTS" ] || break
+        [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
+        OUT=
+        continue
+      fi
+      # A failed hand-back cannot be dismissed just because its successor
+      # watcher is healthy: the close is still undelivered.
+      [ "$HOST_RC" -eq 0 ] || break
+    fi
+
+    # A non-actionable close is benign when another verified watcher already owns
+    # this home and is still beating within the shared grace window.
+    if fm_watcher_healthy "$STATE" "$SCRIPT_DIR/fm-watch.sh" "$GRACE" "$FM_HOME"; then
+      HEALTHY=1
+      break
+    fi
+    [ "$attempt" -lt "$AUTOARM_ATTEMPTS" ] || break
+    [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
+    OUT=
+  done
+}
+
+while :; do
+  park_until_close
+  [ "$ACTIONABLE" -eq 1 ] || break
+  [ ! -e "$FAILURE_ALARM" ] || break
+  need_supervision || break
+  autoack_batch "$OUT" || break
+  # Acknowledged host-side: nothing to deliver, so park again for the next
+  # event in this same generation.
   [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
   OUT=
+  REPARKED=1
 done
 
 # The need may have vanished mid-cycle (fleet torn down, X opted out): nothing
@@ -509,6 +918,14 @@ if [ -e "$FAILURE_ALARM" ]; then
 fi
 
 if [ "$ACTIONABLE" -eq 1 ]; then
+  # Coalesce a warm wake with what follows it, or hold a cold decision-free
+  # one (wake policy above); the need may vanish meanwhile.
+  hold_or_coalesce
+  if ! need_supervision; then
+    autoarm_record clean
+    [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
+    exit 0
+  fi
   # Cheap early-out before composing the banner; the real commit decision is
   # the owned terminal write below.
   if ! fm_autoarm_still_owner "$STATE" "$MY_GEN"; then
@@ -531,9 +948,13 @@ if [ "$ACTIONABLE" -eq 1 ]; then
       printf 'This wake comes from automatic supervision under the away-posture record, not from the captain: it is not a return, so handle it under the away posture.\n'
     fi
     [ -z "$SUCCESSOR_FAILURE" ] || printf '%s\n' "$SUCCESSOR_FAILURE"
+    [ -z "$POLICY_NOTE" ] || printf '%s\n' "$POLICY_NOTE"
+    autoack_digest_line
     printf 'Run bin/fm-wake-drain.sh first, handle the wake, then run its exact WAKE_ACK_REQUIRED --ack-through command. Until that post-handling acknowledgement, interruption leaves the wake durable for idempotent re-handling. This Stop hook owns watcher continuity: when the handling turn ends, the next needed cycle arms automatically - do NOT run bin/fm-watch-arm.sh after an ordinary wake.\n'
   } >&2
   if autoarm_commit rewake; then
+    # The digest above is delivered with this wake; the log keeps the record.
+    rm -f "$AUTOACK_PENDING" 2>/dev/null || true
     [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
     exit 2
   fi
