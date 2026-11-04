@@ -17,6 +17,10 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-session-lock-ancestry)
+# The Stop hook's wake policy (coalescing, hold, auto-ack) is covered by
+# tests/fm-claude-stop-autoarm.test.sh; pin it off so these cases see an
+# immediate rewake and test identity alone.
+export FM_CLAUDE_AUTOARM_AUTOACK=0 FM_CLAUDE_AUTOARM_COALESCE_SECS=0 FM_CLAUDE_AUTOARM_CACHE_TTL_SECS=0
 fm_git_identity fmtest fmtest@example.invalid
 
 LIB="$ROOT/bin/fm-session-lock-lib.sh"

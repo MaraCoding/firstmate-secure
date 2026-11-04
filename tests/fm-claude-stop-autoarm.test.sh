@@ -15,6 +15,11 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-claude-stop-autoarm)
+
+# The wake policy (host-side auto-ack, coalescing, cold-wake hold) has its own
+# cases below that turn it on per run; every other case pins it off so it checks
+# the hook's unchanged contract.
+export FM_CLAUDE_AUTOARM_AUTOACK=0 FM_CLAUDE_AUTOARM_COALESCE_SECS=0 FM_CLAUDE_AUTOARM_CACHE_TTL_SECS=0
 fm_git_identity fmtest fmtest@example.invalid
 
 FAKEBIN=$(fm_fakebin "$TMP_ROOT/fakebin")
@@ -1986,6 +1991,284 @@ test_fm_lock_status_still_works_with_shared_lib() {
   pass "fm-lock: shared session-lock lib preserves the status path"
 }
 
+# --- wake policy: host-side auto-ack, coalescing, cold-wake hold ---------------
+
+POLICY_PAUSE_LINE='stale: fm:w1 (paused 100s, awaiting external - declared pause, rechecked on a long cadence not a wedge; confirm the wait still holds)'
+POLICY_ROUTINE_LINE='stale: fm:w2 (idle 500s, writing its worktree for 30s, rechecked on a long cadence not a wedge; confirm the writes are real progress)'
+
+# A policy fixture home carries the whole bin/ so the hook's auto-ack runs the
+# real bin/fm-wake-drain.sh acknowledgement path.
+make_policy_dir() {
+  local dir
+  dir=$(make_primary_dir "$1")
+  cp -R "$ROOT/bin/." "$dir/bin/"
+  : > "$dir/state/task.meta"
+  printf '%s\n' "$dir"
+}
+
+# Write a policy arm fixture: <dir> <foreground-body> <predecessor-body>. The
+# foreground body runs with N set to its 1-based foreground run count, the
+# predecessor body (collect cycles and the detached handling successor) with K
+# set to its own run count. queue_row <seq> <kind> <payload> appends a durable row.
+write_policy_arm() {
+  local dir=$1 fg=$2 pred=$3
+  {
+    cat <<'SH'
+#!/usr/bin/env bash
+S="$FM_HOME/state"
+queue_row() { printf '%s\t%s\t%s\t%s\t%s\n' "$(date +%s)" "$1" "$2" "key$1" "$3" >> "$S/.wake-queue"; printf '%s\n' "$1" > "$S/.wake-queue.seq"; }
+if [ -n "${FM_WATCH_PREDECESSOR_ARM_PID:-}" ]; then
+  echo "$$" >> "$S/successor-ran"
+  K=$(awk 'END { print NR }' "$S/successor-ran")
+SH
+    printf '%s\n' "$pred"
+    cat <<'SH'
+  exit 0
+fi
+echo "$$" >> "$S/arm-ran"
+N=$(awk 'END { print NR }' "$S/arm-ran")
+touch "$S/.last-watcher-beat"
+SH
+    printf '%s\n' "$fg"
+    printf 'exit 0\n'
+  } > "$dir/bin/fm-watch-arm.sh"
+  chmod +x "$dir/bin/fm-watch-arm.sh"
+}
+
+test_policy_autoacks_declared_pause_recheck_and_digests_it() {
+  local dir out status
+  dir=$(make_policy_dir "$TMP_ROOT/policy-autoack")
+  write_policy_arm "$dir" "
+if [ \"\$N\" -eq 1 ]; then
+  printf 'pending:downtime:gen-a\n' > \"\$S/.watcher-down\"
+  queue_row 1 stale '$POLICY_PAUSE_LINE'
+  echo \"watcher: started pid=\$\$ (beacon fresh)\"
+  echo '$POLICY_PAUSE_LINE'
+  exit 0
+fi
+cp \"\$S/.wake-queue\" \"\$S/queue-at-second\" 2>/dev/null || : > \"\$S/queue-at-second\"
+cp \"\$S/.watcher-down\" \"\$S/marker-at-second\"
+printf 'pending:downtime:gen-b\n' > \"\$S/.watcher-down\"
+queue_row 2 signal 'signal: task.status done: fixture landed'
+echo \"watcher: started pid=\$\$ (beacon fresh)\"
+echo 'signal: task.status done: fixture landed'" '
+echo "watcher: started pid=$$ (beacon fresh)"'
+  out=$(FM_CLAUDE_AUTOARM_AUTOACK=1 run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "the decision after an auto-acked recheck must still rewake"
+  [ "$(awk 'END { print NR }' "$dir/state/arm-ran")" -eq 2 ] \
+    || fail "an auto-acked close must re-park in the same generation: $(cat "$dir/state/arm-ran")"
+  [ ! -s "$dir/state/queue-at-second" ] || fail "the recheck row was not acknowledged: $(cat "$dir/state/queue-at-second")"
+  [ "$(cat "$dir/state/marker-at-second")" = acked:downtime:gen-a ] \
+    || fail "the auto-ack did not retire the recovery episode: $(cat "$dir/state/marker-at-second")"
+  assert_contains "$out" "signal: task.status done: fixture landed" "the rewake must carry the decision"
+  ! grep -q '^stale: fm:w1' <<<"$out" || fail "the auto-acked recheck must not be delivered as a wake line: $out"
+  assert_contains "$out" "Auto-acknowledged by this Stop hook since your last wake, no action needed: 1 declared-pause recheck(s)" \
+    "the rewake must carry the one-line digest of what was auto-acked"
+  assert_contains "$(cat "$dir/state/.claude-autoarm-autoacked.log")" "$POLICY_PAUSE_LINE" "the auto-ack must be recorded durably"
+  [ ! -e "$dir/state/.claude-autoarm-autoacked" ] || fail "a delivered digest must not be repeated at the next wake"
+  [ "$(epoch_outcome "$dir")" = rewake ] || fail "epoch must record outcome=rewake, got: $(epoch_outcome "$dir")"
+  pass "wake policy: a declared-pause recheck is acknowledged host-side, re-parked, and digested at the next real wake"
+}
+
+test_policy_never_autoacks_beside_a_decision() {
+  local dir out status
+  dir=$(make_policy_dir "$TMP_ROOT/policy-no-autoack")
+  write_policy_arm "$dir" "
+printf 'pending:downtime:gen-a\n' > \"\$S/.watcher-down\"
+queue_row 1 signal 'signal: task.status blocked: needs the captain'
+queue_row 2 stale '$POLICY_PAUSE_LINE'
+echo \"watcher: started pid=\$\$ (beacon fresh)\"
+echo '$POLICY_PAUSE_LINE'" '
+echo "watcher: started pid=$$ (beacon fresh)"'
+  out=$(FM_CLAUDE_AUTOARM_AUTOACK=1 run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "a recheck queued beside a decision must rewake"
+  assert_contains "$out" "paused 100s" "the recheck must be delivered when the queue holds a decision"
+  [ "$(awk 'END { print NR }' "$dir/state/.wake-queue")" -eq 2 ] || fail "nothing may be acknowledged beside a decision"
+  [ ! -e "$dir/state/.claude-autoarm-autoacked.log" ] || fail "nothing may be recorded as auto-acked beside a decision"
+  pass "wake policy: a recheck is never auto-acked while the queue holds a decision"
+}
+
+test_policy_config_file_turns_autoack_off() {
+  local dir out status
+  dir=$(make_policy_dir "$TMP_ROOT/policy-autoack-off")
+  printf 'autoack=0\n' > "$dir/config/claude-wake-policy"
+  write_policy_arm "$dir" "
+printf 'pending:downtime:gen-a\n' > \"\$S/.watcher-down\"
+queue_row 1 stale '$POLICY_PAUSE_LINE'
+echo \"watcher: started pid=\$\$ (beacon fresh)\"
+echo '$POLICY_PAUSE_LINE'" '
+echo "watcher: started pid=$$ (beacon fresh)"'
+  out=$(FM_CLAUDE_AUTOARM_AUTOACK='' run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "with auto-ack off the recheck must rewake as before"
+  assert_contains "$out" "paused 100s" "with auto-ack off the recheck must be delivered"
+  [ "$(awk 'END { print NR }' "$dir/state/arm-ran")" -eq 1 ] || fail "with auto-ack off the hook must not re-park"
+  pass "wake policy: config/claude-wake-policy autoack=0 keeps every recheck a wake"
+}
+
+test_policy_coalesces_events_inside_the_window() {
+  local dir out status started elapsed
+  dir=$(make_policy_dir "$TMP_ROOT/policy-coalesce")
+  write_policy_arm "$dir" "
+printf 'pending:downtime:gen-a\n' > \"\$S/.watcher-down\"
+echo \"watcher: started pid=\$\$ (beacon fresh)\"
+echo 'signal: first.status done: one'" '
+echo "watcher: started pid=$$ (beacon fresh)"
+case "$K" in
+  1) sleep 1; echo "signal: second.status done: two" ;;
+  2) sleep 30 ;;
+esac'
+  started=$(date +%s)
+  out=$(FM_CLAUDE_AUTOARM_COALESCE_SECS=4 run_autoarm "$dir" 2>/dev/null); status=$?
+  elapsed=$(( $(date +%s) - started ))
+  expect_code 2 "$status" "a coalesced batch must rewake once"
+  assert_contains "$out" "signal: first.status done: one" "the first event must be delivered"
+  assert_contains "$out" "signal: second.status done: two" "an event inside the window must join the same wake"
+  [ "$(grep -c '^firstmate watcher wake' <<<"$out")" -eq 1 ] || fail "coalesced events must produce one banner: $out"
+  [ "$elapsed" -lt 20 ] || fail "the coalesce window must bound the wait, took ${elapsed}s"
+  pass "wake policy: events inside the coalesce window produce one wake"
+}
+
+test_policy_holds_cold_routine_wake_until_a_second_batch() {
+  local dir out status
+  dir=$(make_policy_dir "$TMP_ROOT/policy-hold-batch")
+  write_policy_arm "$dir" "
+sleep 2
+printf 'pending:downtime:gen-a\n' > \"\$S/.watcher-down\"
+echo \"watcher: started pid=\$\$ (beacon fresh)\"
+echo '$POLICY_ROUTINE_LINE'" '
+echo "watcher: started pid=$$ (beacon fresh)"
+case "$K" in
+  1) : > "$S/hold-started"; sleep 2; echo "signal: landed.status done: merged" ;;
+esac'
+  out=$(FM_CLAUDE_AUTOARM_CACHE_TTL_SECS=1 FM_CLAUDE_AUTOARM_COLD_HOLD_MAX_SECS=60 run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "a held wake must still rewake when the next batch arrives"
+  assert_present "$dir/state/hold-started" "a cold decision-free wake must be held on a further cycle"
+  assert_contains "$out" "fm:w2 (idle 500s" "the held event must be delivered"
+  assert_contains "$out" "signal: landed.status done: merged" "the releasing batch must be delivered with it"
+  assert_contains "$out" "released by a second event batch" "the banner must say why the hold ended"
+  pass "wake policy: a cold decision-free wake is held until a second batch arrives"
+}
+
+test_policy_hold_releases_at_its_limit() {
+  local dir out status
+  dir=$(make_policy_dir "$TMP_ROOT/policy-hold-limit")
+  write_policy_arm "$dir" "
+sleep 2
+printf 'pending:downtime:gen-a\n' > \"\$S/.watcher-down\"
+echo \"watcher: started pid=\$\$ (beacon fresh)\"
+echo '$POLICY_ROUTINE_LINE'" '
+echo "watcher: started pid=$$ (beacon fresh)"
+[ "$K" -ne 1 ] || sleep 60'
+  out=$(FM_CLAUDE_AUTOARM_CACHE_TTL_SECS=1 FM_CLAUDE_AUTOARM_COLD_HOLD_MAX_SECS=3 run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "a hold that reaches its limit must rewake"
+  assert_contains "$out" "fm:w2 (idle 500s" "the held event must be delivered at the limit"
+  assert_contains "$out" "released by the hold limit" "the banner must name the hold limit"
+  pass "wake policy: a held wake is delivered at the maximum hold"
+}
+
+test_policy_hold_releases_on_session_activity() {
+  local dir out status transcript toucher
+  dir=$(make_policy_dir "$TMP_ROOT/policy-hold-activity")
+  transcript="$TMP_ROOT/policy-hold-activity-transcript.jsonl"
+  : > "$transcript"
+  touch -d '@1000000000' "$transcript" 2>/dev/null || true
+  write_policy_arm "$dir" "
+sleep 2
+printf 'pending:downtime:gen-a\n' > \"\$S/.watcher-down\"
+echo \"watcher: started pid=\$\$ (beacon fresh)\"
+echo '$POLICY_ROUTINE_LINE'" '
+echo "watcher: started pid=$$ (beacon fresh)"
+if [ "$K" -eq 1 ]; then : > "$S/hold-started"; sleep 60; fi'
+  ( while [ ! -e "$dir/state/hold-started" ]; do sleep 0.2; done; sleep 2; touch "$transcript" ) &
+  toucher=$!
+  out=$(FM_CLAUDE_AUTOARM_CACHE_TTL_SECS=1 FM_CLAUDE_AUTOARM_COLD_HOLD_MAX_SECS=60 \
+    run_autoarm "$dir" "{\"session_id\":\"sess-autoarm\",\"stop_hook_active\":false,\"transcript_path\":\"$transcript\"}" 2>/dev/null); status=$?
+  wait "$toucher" 2>/dev/null || true
+  expect_code 2 "$status" "a captain prompt must release the hold"
+  assert_contains "$out" "released by activity in the session" "the banner must name the session activity"
+  pass "wake policy: activity in the session (a captain prompt) releases a held wake"
+}
+
+test_policy_never_holds_a_cold_decision() {
+  local dir out status started elapsed
+  dir=$(make_policy_dir "$TMP_ROOT/policy-hold-decision")
+  write_policy_arm "$dir" "
+sleep 2
+printf 'pending:downtime:gen-a\n' > \"\$S/.watcher-down\"
+echo \"watcher: started pid=\$\$ (beacon fresh)\"
+echo 'signal: task.status needs-decision: pick a layout'" '
+echo "watcher: started pid=$$ (beacon fresh)"
+[ "$K" -ne 1 ] || : > "$S/held"'
+  started=$(date +%s)
+  out=$(FM_CLAUDE_AUTOARM_CACHE_TTL_SECS=1 FM_CLAUDE_AUTOARM_COLD_HOLD_MAX_SECS=60 run_autoarm "$dir" 2>/dev/null); status=$?
+  elapsed=$(( $(date +%s) - started ))
+  expect_code 2 "$status" "a cold decision must rewake at once"
+  assert_contains "$out" "needs-decision: pick a layout" "the decision must be delivered"
+  assert_not_contains "$out" "was held" "a decision must never be held"
+  [ "$elapsed" -lt 15 ] || fail "a cold decision waited ${elapsed}s"
+  pass "wake policy: a cold wake carrying a decision is never held"
+}
+
+test_policy_host_boundary_is_never_acked_or_held() {
+  local dir out status
+  dir=$(make_policy_dir "$TMP_ROOT/policy-host-boundary")
+  rm -f "$dir/config/supervision-host-off"
+  cat > "$dir/bin/fm-supervision-host.sh" <<SH
+#!/usr/bin/env bash
+echo "\$\$" >> "\$FM_HOME/state/host-ran"
+sleep 2
+printf 'pending:downtime:gen-a\n' > "\$FM_HOME/state/.watcher-down"
+printf '%s\t1\tstale\tkey1\t%s\n' "\$(date +%s)" '$POLICY_PAUSE_LINE' >> "\$FM_HOME/state/.wake-queue"
+touch "\$FM_HOME/state/.last-watcher-beat"
+echo '$POLICY_PAUSE_LINE'
+echo 'supervision-host: cycle boundary - fixture'
+exit 0
+SH
+  chmod +x "$dir/bin/fm-supervision-host.sh"
+  out=$(FM_CLAUDE_AUTOARM_AUTOACK=1 FM_CLAUDE_AUTOARM_CACHE_TTL_SECS=1 FM_CLAUDE_AUTOARM_COALESCE_SECS=30 \
+    run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "a host cycle boundary must rewake"
+  assert_contains "$out" "supervision-host: cycle boundary - fixture" "the boundary must be delivered"
+  assert_not_contains "$out" "was held" "a boundary must never be held"
+  [ "$(awk 'END { print NR }' "$dir/state/host-ran")" -eq 1 ] || fail "a boundary must not re-park or coalesce"
+  [ "$(awk 'END { print NR }' "$dir/state/.wake-queue")" -eq 1 ] || fail "a boundary batch must not be auto-acked"
+  pass "wake policy: a host cycle boundary is never auto-acked, held, or coalesced"
+}
+
+test_policy_host_autoack_reparks_within_the_budget() {
+  local dir out status park
+  dir=$(make_policy_dir "$TMP_ROOT/policy-host-autoack")
+  rm -f "$dir/config/supervision-host-off"
+  cat > "$dir/bin/fm-supervision-host.sh" <<SH
+#!/usr/bin/env bash
+S="\$FM_HOME/state"
+echo "\$\$ park=\${FM_SUPERVISION_HOST_PARK_SECONDS:-unset}" >> "\$S/host-ran"
+N=\$(awk 'END { print NR }' "\$S/host-ran")
+touch "\$S/.last-watcher-beat"
+if [ "\$N" -eq 1 ]; then
+  printf 'pending:downtime:gen-a\n' > "\$S/.watcher-down"
+  printf '%s\t1\tstale\tkey1\t%s\n' "\$(date +%s)" '$POLICY_PAUSE_LINE' >> "\$S/.wake-queue"
+  echo '$POLICY_PAUSE_LINE'
+  echo 'supervision-host: the supervision session could not take this wake: main-only; this wake is yours'
+  exit 0
+fi
+printf 'pending:downtime:gen-b\n' > "\$S/.watcher-down"
+echo 'signal: task.status done: fixture landed'
+exit 0
+SH
+  chmod +x "$dir/bin/fm-supervision-host.sh"
+  out=$(FM_CLAUDE_AUTOARM_AUTOACK=1 FM_CLAUDE_AUTOARM_PARK_BUDGET_SECS=20000 run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "the host's later decision must rewake"
+  [ "$(awk 'END { print NR }' "$dir/state/host-ran")" -eq 2 ] || fail "the host must re-park after an auto-ack: $(cat "$dir/state/host-ran")"
+  [ "$(sed -n '1s/^.* park=//p' "$dir/state/host-ran")" = unset ] || fail "the first host park must keep its own boundary"
+  park=$(sed -n '2s/^.* park=//p' "$dir/state/host-ran")
+  case "$park" in ''|unset|*[!0-9]*) fail "a host re-park must carry the remaining park budget, got: $park" ;; esac
+  [ "$park" -le 20000 ] || fail "a host re-park outlived the park budget: $park"
+  assert_contains "$out" "Auto-acknowledged by this Stop hook" "the host rewake must carry the digest"
+  ! grep -q '^stale: fm:w1' <<<"$out" || fail "the auto-acked recheck must not be delivered as a wake line: $out"
+  pass "wake policy: on the host an auto-acked recheck re-parks inside the hook's park budget"
+}
+
 test_inert_in_child_worktree
 test_inert_without_session_lock
 test_reclaims_stale_session_lock_before_arming
@@ -2049,3 +2332,13 @@ test_host_crash_is_retried_then_reported
 test_arguments_never_arm
 test_fm_lock_status_still_works_with_shared_lib
 test_stands_down_only_on_pi_code_transcript_path
+test_policy_autoacks_declared_pause_recheck_and_digests_it
+test_policy_never_autoacks_beside_a_decision
+test_policy_config_file_turns_autoack_off
+test_policy_coalesces_events_inside_the_window
+test_policy_holds_cold_routine_wake_until_a_second_batch
+test_policy_hold_releases_at_its_limit
+test_policy_hold_releases_on_session_activity
+test_policy_never_holds_a_cold_decision
+test_policy_host_boundary_is_never_acked_or_held
+test_policy_host_autoack_reparks_within_the_budget
