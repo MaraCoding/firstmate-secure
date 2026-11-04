@@ -67,5 +67,11 @@
         ]
       }
     ]
+  },
+  "autoCompactWindow": 120000,
+  "idleCompaction": true,
+  "awaySummaryEnabled": false,
+  "env": {
+    "CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS": "100000"
   }
 }

@@ -1046,6 +1046,7 @@ For omp secondmate launches, `fm-spawn.sh` names only the parent home's `state/<
 For a Claude secondmate, `fm-spawn.sh` writes the busy hooks into the parent home's `state/<id>.claude-settings.json` and passes that file as Claude Code's one `--settings` value.
 The same file carries `feedbackDrafts`, `autoCompactWindow`, and, unless `config/keep-ai-trailers` is present, the attribution policy every other Claude launch puts in its inline `--settings` JSON.
 Claude crewmates, scouts, and secondmates use a fixed 272000-token auto-compact window to bound context growth, without changing the primary session's settings or any other harness.
+The primary's own session compacts at 120k (`autoCompactWindow` in `.claude/settings.json`) and idle-compacts at 100k (`idleCompaction` with `CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS`), so a cold wake after the 1h cache TTL re-writes about 100k tokens instead of up to 290k (measured on the Oxtal primary, 2026-11-04). Workers keep 272000 via `fm-spawn`, and session recaps are off (`awaySummaryEnabled: false`).
 `bin/fm-spawn.sh` owns the per-launch settings mechanics.
 Claude Code applies `--settings` for that session and does not write the file into the mate home.
 A key the file sets overrides the same key in user, project, and local settings.
