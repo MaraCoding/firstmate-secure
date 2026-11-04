@@ -1,8 +1,8 @@
 ---
 name: quiet
 description: >-
-  Enter quiet supervision mode when the captain invokes /quiet or asks for quiet mode, quiet-while-present, or fewer routine wake turns while they stay in the session.
-  Unlike /afk, ordinary captain chat does not exit it; only an explicit `/quiet off` does.
+  Enter quiet supervision on /quiet or a request for quiet mode, quiet-while-present, or fewer routine wake turns while the captain stays.
+  Ordinary chat does not exit it; only `/quiet off` does.
 user-invocable: true
 metadata:
   internal: true

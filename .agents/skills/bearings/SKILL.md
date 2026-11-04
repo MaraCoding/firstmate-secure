@@ -1,9 +1,8 @@
 ---
 name: bearings
 description: >-
-  Generate a "pick up where I left off" fleet digest.
-  Use when the captain invokes /bearings (plain, file, or lavish) or asks for a bearings report, morning brief, status report, catch-up, "where did I leave off", or "what's in the works".
-  Also use on a contributions check wake, when filing work linked to an upstream issue, and on a procevent lavish wake whose source id is the bearings board's.
+  Fleet digest when the captain invokes /bearings (plain, file, lavish) or asks for bearings, morning brief, status report, catch-up, "where did I leave off", "what's in the works".
+  Also on a contributions check wake, filing work linked to an upstream issue, or a procevent lavish wake from the bearings board.
 user-invocable: true
 metadata:
   internal: true

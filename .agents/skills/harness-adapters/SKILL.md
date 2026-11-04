@@ -1,7 +1,8 @@
 ---
 name: harness-adapters
 description: >-
-  Load before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter.
+  Load before spawning or recovering a crewmate or secondmate, a trust dialog, a harness-specific skill invocation,
+  interrupting, exiting, or resuming an agent, or verifying a new harness adapter.
 user-invocable: false
 metadata:
   internal: true

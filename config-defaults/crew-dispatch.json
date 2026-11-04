@@ -20,7 +20,7 @@
         "effort": "high",
         "provider": "claude"
       },
-      "why": "Captain's pipeline stage 2: Fable corrects the plan Astra wrote, so a different model family catches the planner's blind spots before Sol builds."
+      "why": "Captain's pipeline stage 2: Fable corrects the plan the scout wrote, so a different model family catches the planner's blind spots before Sol builds."
     },
     {
       "when": "The task is an independent adversarial review, verification, or second opinion on code another crewmate produced: checking a ready branch against its brief, hunting bugs and regressions, or judging whether tests actually prove the behavior.",
@@ -36,11 +36,21 @@
       "when": "The task is a scout: investigation, diagnosis, audit, root-cause hunting, or planning and design work whose main output is understanding, a plan, or a written recommendation rather than a code change. Not a review of an existing plan or of finished code.",
       "use": {
         "harness": "pi",
-        "model": "openai-codex/gpt-6-astra",
-        "effort": "xhigh",
+        "model": "openai-codex/gpt-6.1-sol",
+        "effort": "high",
         "provider": "codex"
       },
-      "why": "Captain's pipeline stage 1: Astra plans. Do not downgrade this class solely to conserve quota."
+      "why": "Captain's pipeline stage 1: Sol scouts and plans. Captain 2026-11-04: the Astra inventory scout cost $14.59 where the same tokens on Sol cost $1.98. Use Astra (openai-codex/gpt-6-astra) only when the captain names it for a specific task."
+    },
+    {
+      "when": "The task is a chore: a machine or tool fix, installing or upgrading a tool, a download, fetching a reference or file, ssh or service repair, terminal multiplexer or session housekeeping, or one-off research or lookup, with no code change to a project repo.",
+      "use": {
+        "harness": "pi",
+        "model": "openai-codex/gpt-6.1-sol",
+        "effort": "low",
+        "provider": "codex"
+      },
+      "why": "Captain 2026-11-04: the primary spent $8-9 of Opus time on herdr fixes, tmux moves, ssh, failed downloads and treehouse slot repair. Chores go to the cheapest configured pair, never inline in the primary."
     },
     {
       "when": "The task is a big or ambiguous multi-file feature, a risky refactor, a cross-cutting change to shared libraries or contracts, or work that requires holding many moving parts in mind at once.",

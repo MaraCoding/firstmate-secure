@@ -670,6 +670,13 @@ Persistent secondmates hold no lane.
 The file is a per-machine choice and is not inherited by secondmate homes.
 The script's header owns the output line, the host-constraint thresholds, and the probe fallbacks.
 
+## Crew context limit (config/crew-context-limit)
+
+The optional local, gitignored `config/crew-context-limit` file holds one positive integer: the live context size, in tokens, past which a ship or scout session is ended and respawned with a handoff brief instead of steered.
+With the file absent the limit is 250000; `FM_CREW_CONTEXT_LIMIT` overrides the file for one run, and a malformed value is refused rather than guessed.
+`bin/fm-context-check.sh <task>` reports the session's last-turn input tokens for Pi and Claude workers against the limit, and `bin/fm-send.sh` refuses a text steer to a local ship or scout past it unless given `--allow-large-context`; unknown context never blocks.
+The script's header owns session resolution, the measure, and exit codes.
+
 ## PR-ready line after green (config/ready-after-green)
 
 The optional local, gitignored `config/ready-after-green` presence flag opts a secondmate home into publishing its child's PR-ready parent line only after the child has reported checks green.
