@@ -152,10 +152,12 @@ fi
 
 # Scan the tail newest-first for the last assistant row with real usage.
 if [ "$HARNESS" = pi ]; then
+  # shellcheck disable=SC2016 # jq program: $-names are jq bindings, not shell expansions.
   FILTER='select(.type == "message" and .message.role == "assistant" and (.message.usage | type) == "object")
     | .message as $m | (($m.usage.input // 0) + ($m.usage.cacheRead // 0) + ($m.usage.cacheWrite // 0)) as $c
     | select($c > 0) | "\($c)\t\($m.model // "?")\t\(.timestamp // "?")"'
 else
+  # shellcheck disable=SC2016 # jq program: $-names are jq bindings, not shell expansions.
   FILTER='select(.type == "assistant" and (.isSidechain | not) and (.message.usage | type) == "object" and .message.model != "<synthetic>")
     | .message as $m | (($m.usage.input_tokens // 0) + ($m.usage.cache_read_input_tokens // 0) + ($m.usage.cache_creation_input_tokens // 0)) as $c
     | select($c > 0) | "\($c)\t\($m.model // "?")\t\(.timestamp // "?")"'

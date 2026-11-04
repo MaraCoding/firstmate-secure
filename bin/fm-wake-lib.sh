@@ -1743,7 +1743,9 @@ fm_treehouse_slot_live_holder() {  # <worktree> <own-id> <state-dir>...
       wt=$(fm_treehouse_meta_worktree "$meta")
       line=$(CDPATH='' cd -- "$wt" 2>/dev/null && pwd -P) || line=
       if [ -n "$wt" ] && [ "$line" = "$slot" ]; then
+        # shellcheck disable=SC2034 # Output global, read by the sourcing caller (bin/fm-spawn.sh slot-holder refusal).
         FM_TREEHOUSE_SLOT_HOLDER_ID=$FM_TREEHOUSE_SLOT_OWNER_ID
+        # shellcheck disable=SC2034 # Output global, read by the sourcing caller (bin/fm-spawn.sh slot-holder refusal).
         FM_TREEHOUSE_SLOT_HOLDER_META=$meta
         return 0
       fi

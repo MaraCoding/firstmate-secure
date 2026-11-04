@@ -15,6 +15,7 @@ mkdir -p "$HOME_DIR/data/t1"
 REPORT="$HOME_DIR/data/t1/report.md"
 {
   printf '# Report\n\nintro\n\n## Verdict\n\nShip it.\n\n## Findings\n\n'
+  # shellcheck disable=SC2016 # Literal markdown code fence; the backticks must not run.
   printf '```\n## not a heading\n```\n'
   printf '%0500d\n' 0
   for i in $(seq 1 30); do printf 'finding %s\n' "$i"; done

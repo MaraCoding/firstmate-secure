@@ -16,7 +16,7 @@ test_default_view_is_small_and_complete() {
   n=$(printf '%s\n' "$out" | wc -c | tr -d ' ')
   [ "$n" -lt 6000 ] || fail "the default cheat sheet should stay under 6000 chars, got $n"
   for cmd in fm-spawn fm-send fm-control fm-crew-state fm-teardown fm-context-check fm-report-outline fm-dispatch-resolve fm-tasks-axi; do
-    printf '%s\n' "$out" | grep -q "^$cmd[ ]" || fail "the cheat sheet should list $cmd"
+    printf '%s\n' "$out" | grep -q "^${cmd}[ ]" || fail "the cheat sheet should list $cmd"
   done
   assert_contains "$out" "fm-control <task-id> interrupt|exit|relaunch" "multi-form usage should collapse to verbs"
   printf '%s\n' "$out" | awk 'length($0) > 118 { exit 1 }' || fail "every line should fit FM_HELP_WIDTH"
