@@ -24,6 +24,20 @@
 # under the writer's lock, so an out-of-order apply can never regress a
 # newer record.
 #
+# Boot sidecar: state/<id>.busy-boot - one line, written by arm beside the gen
+# it names:
+#
+#   v1 gen=<token> boot=<kernel-boot-id>
+#
+# It records which host boot the incarnation was armed in. No process survives
+# a host restart, so a gen armed in an earlier boot belongs to nothing that is
+# running now, whatever a terminal backend has restored into the endpoint
+# since. fm_busy_incarnation_restored below owns that reading, its fallback
+# for a gen armed before the sidecar existed, and every case in which it stays
+# silent; bin/fm-crew-state.sh reports it as source restored-after-boot. It is
+# deliberately NOT part of fm_busy_classify: classification says what a record
+# claims, this says whether the record's agent can still be the one running.
+#
 # Semantic sources written by adapters (fm_busy_sources_for_harness owns the
 # per-harness trust table; a record whose source is not trusted for the
 # task's recorded harness classifies unknown, so one adapter's writer can
@@ -312,6 +326,189 @@ fm_busy_record_read() {  # <state-dir> <id>
     return 1
   fi
   printf '%s %s %s %s' "$r_state" "$r_source" "$r_event" "$r_seq"
+}
+
+# ---------------------------------------------------------------------------
+# Incarnation and host boot
+#
+# A gen says WHICH incarnation a record belongs to. It does not say that
+# incarnation is still the process sitting in the endpoint, and after a host
+# restart it is not: every agent the fleet launched died with the boot, while a
+# terminal backend that saves its layout can bring the endpoint back with a new
+# agent in it. Herdr 0.9.5 does exactly that by default
+# (`resume_agents_on_restore`): on server start it re-runs a bare
+# `pi --session <path>` or `claude --resume <id>` in each saved pane, with none
+# of the fleet's launch environment - no FM_TASK_ID, no FM_TASK_INBOX, no
+# per-task busy wiring, no model or permission flags (docs/herdr-backend.md
+# "Restored agents after a host restart"). The endpoint reads alive, the busy
+# record on disk still says whatever the dead incarnation last wrote, and a
+# reader that trusts both reports a degraded stand-in as its healthy
+# predecessor: 28 agents came back that way on 2026-11-09, crew-state answered
+# `paused` off the status log when a supervisor asked, and it steered one.
+#
+# So arm binds each gen to the host boot it was minted in, and
+# fm_busy_incarnation_restored answers one question from disk alone, with no
+# backend call: was the incarnation this task's record names armed in an
+# EARLIER boot? It is asked by a caller that has already established the
+# endpoint is alive; it says nothing about liveness itself.
+
+fm_busy_boot_path() {  # <state-dir> <id>
+  printf '%s/%s.busy-boot' "$1" "$2"
+}
+
+# fm_busy_host_boot_id: the running kernel's boot id, or failure on a platform
+# that exposes none (macOS has no /proc). The kernel mints it once per boot and
+# it is not a clock, so no clock step, suspend, or drift can change it.
+# FM_PROC_ROOT_OVERRIDE is the shared test seam for /proc reads.
+fm_busy_host_boot_id() {
+  local file id=
+  file="${FM_PROC_ROOT_OVERRIDE:-/proc}/sys/kernel/random/boot_id"
+  [ -r "$file" ] || return 1
+  IFS= read -r id < "$file" 2>/dev/null || [ -n "$id" ] || return 1
+  fm_busy_token_valid "$id" || return 1
+  printf '%s' "$id"
+}
+
+# fm_busy_boot_binding: the boot id recorded for exactly <gen>, or failure when
+# there is no sidecar, it is malformed, or it names another gen. Binding the
+# sidecar to its gen is what makes a leftover harmless: a sidecar that outlived
+# its incarnation is simply not this incarnation's, and the fallback below
+# decides instead.
+fm_busy_boot_binding() {  # <state-dir> <id> <gen>
+  local file line extra f b_gen='' b_boot=''
+  file=$(fm_busy_boot_path "$1" "$2")
+  [ -f "$file" ] || return 1
+  # shellcheck disable=SC2034 # extra exists only to prove the sidecar is one line
+  { IFS= read -r line && ! IFS= read -r extra; } < "$file" 2>/dev/null || return 1
+  local -a fields
+  IFS=' ' read -r -a fields <<< "$line"
+  [ "${fields[0]:-}" = "$FM_BUSY_LIB_VERSION" ] || return 1
+  for f in "${fields[@]:1}"; do
+    case "$f" in
+      gen=*) b_gen=${f#gen=} ;;
+      boot=*) b_boot=${f#boot=} ;;
+      *) return 1 ;;
+    esac
+  done
+  [ -n "${3:-}" ] && [ "$b_gen" = "$3" ] || return 1
+  fm_busy_token_valid "$b_boot" || return 1
+  printf '%s' "$b_boot"
+}
+
+# The fallback's two allowances, in seconds. A gen must predate this boot by
+# more than the margin before it is called earlier-boot at all, and the /run
+# stamp is believed only when it is no later than the kernel's own boot time
+# plus the slack, which covers the kernel-to-userspace gap of an ordinary boot.
+FM_BUSY_BOOT_MARGIN_SECS=120
+FM_BUSY_BOOT_WITNESS_SLACK_SECS=300
+
+# fm_busy_run_oldest_mtime: the oldest modification time among /run's own
+# entries, in epoch seconds, or failure. /run starts empty at every boot and
+# several of its entries are created once in early boot and never touched
+# again, so this is a wall-clock stamp of the boot that is stored rather than
+# derived, and therefore cannot move afterwards. Read with find, not a glob, so
+# a caller running noglob gets the same answer. FM_RUN_ROOT_OVERRIDE is its
+# test seam.
+fm_busy_run_oldest_mtime() {
+  local run_root=${FM_RUN_ROOT_OVERRIDE:-/run} oldest=
+  [ -d "$run_root" ] || return 1
+  # BSD and GNU stat disagree on the format flag, and the two forms must never
+  # be chained with || (bin/fm-busy-event.sh's lock_mtime says why).
+  case "$(uname 2>/dev/null)" in
+    Darwin)
+      oldest=$(find "$run_root" -mindepth 1 -maxdepth 1 -exec /usr/bin/stat -f %m {} + 2>/dev/null \
+        | LC_ALL=C awk 'NR == 1 || $1 + 0 < m { m = $1 + 0 } END { if (NR) printf "%d", m }') || :
+      ;;
+    *)
+      oldest=$(find "$run_root" -mindepth 1 -maxdepth 1 -exec stat -c %Y {} + 2>/dev/null \
+        | LC_ALL=C awk 'NR == 1 || $1 + 0 < m { m = $1 + 0 } END { if (NR) printf "%d", m }') || :
+      ;;
+  esac
+  case "$oldest" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s' "$oldest"
+}
+
+# fm_busy_gen_predates_boot: the fallback for an incarnation armed before the
+# boot sidecar existed - the gen's own mint second (g<epoch>.<pid>.<random>)
+# against the start of this boot. 0 only when the gen is clearly older.
+#
+# It compares clocks, so it can be wrong, and it is built to err toward
+# silence: under drift, a suspended host, or a clock stepped forward it can
+# only fail to notice a restored incarnation, never call a live, fleet-launched
+# one restored (the end of this comment names the one clock history that can).
+# That takes two boot estimates, because neither is safe alone:
+#   - /proc/stat `btime` is derived (wall clock minus kernel uptime), so it
+#     moves whenever those two clocks part ways: a stepped clock, a suspended
+#     host, or plain drift. Measured on a WSL2 host on 2026-11-10: btime read
+#     20 min 29 s later than the real boot after 9 h 20 min up, and was still
+#     moving. Alone it would call every task armed in the first minutes of
+#     THIS boot restored, and more of them with every hour of uptime.
+#   - the oldest mtime in /run is stored at boot and does not move, but it is
+#     a boot stamp only while an entry from early boot survives untouched. It
+#     is therefore believed only when it is no later than btime plus a slack:
+#     a /run stamp later than that was written well after boot and proves
+#     nothing.
+# The gen must predate BOTH by FM_BUSY_BOOT_MARGIN_SECS. A stepped wall clock
+# can still defeat it, in both directions. A gen stamped by a clock running
+# ahead looks newer than it was and is quietly not flagged. And a live
+# incarnation is called restored in one case: the wall clock was set BACK
+# after boot, by more than the margin plus the time since boot, before that
+# incarnation was armed, so its gen reads older than /run's own stamp. A clock
+# that never goes backwards cannot produce that, however far it drifts or
+# jumps ahead. Anything unreadable, a gen with no plausible mint second in it
+# (hand-written fixtures have none), or a platform with no /proc is a no.
+fm_busy_gen_predates_boot() {  # <gen>
+  local gen=${1:-} epoch btime witness proc_root
+  case "$gen" in
+    g[1-9]*.*) epoch=${gen#g}; epoch=${epoch%%.*} ;;
+    *) return 1 ;;
+  esac
+  case "$epoch" in *[!0-9]*) return 1 ;; esac
+  [ "${#epoch}" -eq 10 ] || return 1
+  proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc}
+  [ -r "$proc_root/stat" ] || return 1
+  btime=$(LC_ALL=C awk '$1 == "btime" { print $2; exit }' "$proc_root/stat" 2>/dev/null) || return 1
+  case "$btime" in ''|*[!0-9]*) return 1 ;; esac
+  [ $((epoch + FM_BUSY_BOOT_MARGIN_SECS)) -lt "$btime" ] || return 1
+  witness=$(fm_busy_run_oldest_mtime) || return 1
+  [ "$witness" -le $((btime + FM_BUSY_BOOT_WITNESS_SLACK_SECS)) ] || return 1
+  [ $((epoch + FM_BUSY_BOOT_MARGIN_SECS)) -lt "$witness" ]
+}
+
+# fm_busy_incarnation_restored: 0, printing the evidence, when the incarnation
+# <meta-file> names for task <id> was armed in an EARLIER boot of this host, so
+# nothing now in its endpoint can be the agent the fleet launched. Evidence:
+#   boot-id    the boot sidecar for this gen names another boot. Exact.
+#   gen-epoch  no sidecar for this gen (it was armed before the sidecar
+#              existed) and fm_busy_gen_predates_boot holds. Conservative,
+#              clock-based.
+# 1 means not restored OR cannot tell, and a caller then answers exactly as it
+# did before this check existed. That covers every case with nothing to
+# compare: a remote task (its agent and its boot are another host's); no armed
+# gen (an adapter with no busy wiring - codex, kimi, grok, rovo, agy, muse,
+# cursor - or a raw launch); a record that does not itself name the armed gen
+# (busy_gen= is written by the launch that armed it and dropped when that
+# incarnation is retired or replaced by an unarmed one, so a gen file an
+# earlier incarnation left behind is never read as this one's); and a platform
+# with no boot id.
+# FM_BUSY_BOOT_CHECK=off is the one switch: it answers "cannot tell" for every
+# task (docs/configuration.md).
+# Requires fm-backend.sh to be sourced, for fm_meta_get.
+fm_busy_incarnation_restored() {  # <meta-file> <id> <state-dir>
+  local meta=$1 id=$2 state=$3 gen armed_boot host_boot
+  [ "${FM_BUSY_BOOT_CHECK:-on}" != off ] || return 1
+  [ -f "$meta" ] || return 1
+  [ -z "$(fm_meta_get "$meta" remote_host)" ] || return 1
+  gen=$(fm_busy_current_gen "$state" "$id") || return 1
+  [ "$(fm_meta_get "$meta" busy_gen)" = "$gen" ] || return 1
+  if armed_boot=$(fm_busy_boot_binding "$state" "$id" "$gen"); then
+    host_boot=$(fm_busy_host_boot_id) || return 1
+    [ "$armed_boot" != "$host_boot" ] || return 1
+    printf 'boot-id'
+    return 0
+  fi
+  fm_busy_gen_predates_boot "$gen" || return 1
+  printf 'gen-epoch'
 }
 
 # ---------------------------------------------------------------------------

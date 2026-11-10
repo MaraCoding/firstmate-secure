@@ -20,7 +20,8 @@
 #     exact disclosed remainder
 #   - orphan status logs whose task meta has already disappeared
 #   - per-task endpoint-liveness lines for a live and a dead recorded target,
-#     tmux and herdr both
+#     tmux and herdr both, and the alive-restored line for a live target whose
+#     armed busy gen belongs to an earlier host boot
 #   - composition: the script invokes the real fm-lock.sh/fm-bootstrap.sh/
 #     fm-wake-drain.sh (their real, distinctive output appears verbatim), it
 #     does not reimplement their logic
@@ -1426,6 +1427,75 @@ EOF
     "a probe exiting 4 was mislabelled as a failed read"
 
   pass "herdr endpoint liveness is reported per task: alive, dead for exit 1, dead for any other probe status"
+}
+
+# An endpoint that outlived a host restart still reads alive: a terminal backend
+# that restores its layout puts an agent back into the pane. That agent was not
+# launched by the fleet, so the digest must not print the plain `alive` that
+# sent a supervisor on to steer one (2026-11-09). The armed busy gen is bound to
+# its host boot (bin/fm-busy-lib.sh's fm_busy_incarnation_restored); a binding
+# that names another boot is the evidence, and a worker armed in THIS boot beside
+# it proves the label is not painted on every armed task.
+test_endpoint_alive_restored_after_host_restart() {
+  local rec root home fakebin out gen
+  [ -r /proc/sys/kernel/random/boot_id ] || {
+    echo "skip: no kernel boot id on this platform (the restored-endpoint check is off without one)"
+    return 0
+  }
+  rec=$(new_world liveness-restored)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  display-message)
+    target=""
+    prev=""
+    for a in "$@"; do
+      [ "$prev" = "-t" ] && target="$a"
+      prev="$a"
+    done
+    case "$target" in
+      fm-sess:restored-window|fm-sess:fresh-window|fm-sess:unarmed-window) printf '%%1\n'; exit 0 ;;
+    esac
+    exit 1
+    ;;
+  list-windows)
+    printf '%s\n' restored-window fresh-window unarmed-window
+    exit 0
+    ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/tmux"
+
+  # Armed by the real writer, then re-bound to a boot that is not this one:
+  # exactly what a task armed before the host restarted looks like on disk.
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$home/state" task-restored) || fail "fixture: arm failed"
+  printf 'v1 gen=%s boot=00000000-0000-4000-8000-00000000dead\n' "$gen" > "$home/state/task-restored.busy-boot"
+  printf 'window=fm-sess:restored-window\nkind=ship\nharness=claude\nbusy_gen=%s\n' "$gen" \
+    > "$home/state/task-restored.meta"
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$home/state" task-fresh) || fail "fixture: arm failed"
+  printf 'window=fm-sess:fresh-window\nkind=ship\nharness=claude\nbusy_gen=%s\n' "$gen" \
+    > "$home/state/task-fresh.meta"
+  printf 'window=fm-sess:unarmed-window\nkind=ship\nharness=codex\n' > "$home/state/task-unarmed.meta"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "endpoint: alive-restored (backend=tmux window=fm-sess:restored-window - " \
+    "an endpoint armed in an earlier boot was not labelled restored"
+  assert_contains "$out" "repair: bin/fm-control.sh task-restored relaunch)" \
+    "the restored endpoint line did not name the repair"
+  assert_not_contains "$out" "endpoint: alive (backend=tmux window=fm-sess:restored-window)" \
+    "a restored endpoint was still reported as plainly alive"
+  assert_contains "$out" "endpoint: alive (backend=tmux window=fm-sess:fresh-window)" \
+    "a worker armed in this boot lost its plain alive line"
+  assert_contains "$out" "endpoint: alive (backend=tmux window=fm-sess:unarmed-window)" \
+    "a worker with no armed busy gen lost its plain alive line"
+  pass "session start: an endpoint that outlived a host restart reads alive-restored with the repair, and only that one"
 }
 
 test_endpoint_read_death_is_isolated_and_reported() {
@@ -3105,6 +3175,7 @@ test_status_tail_line_cap
 test_orphan_status_logs_are_printed
 test_endpoint_liveness_tmux
 test_endpoint_liveness_herdr
+test_endpoint_alive_restored_after_host_restart
 test_endpoint_read_death_is_isolated_and_reported
 test_endpoint_read_hang_is_bounded_and_reported
 test_endpoint_bound_rejects_padded_zero

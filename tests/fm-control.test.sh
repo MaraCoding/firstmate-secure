@@ -816,7 +816,12 @@ test_relaunch_only_flags_are_rejected_on_other_verbs() {
   out=$(run_control "$dir" t1 exit --harness codex); rc=$?
   expect_code 1 "$rc" "--harness should not apply to exit"
   assert_contains "$out" "apply to 'relaunch' only" "the refusal should scope the flags"
-  pass "fm-control: profile and note flags belong to relaunch only"
+  out=$(run_control "$dir" t1 interrupt --fresh); rc=$?
+  expect_code 1 "$rc" "--fresh should not apply to interrupt"
+  assert_contains "$out" "apply to 'relaunch' only" "the refusal should scope --fresh too"
+  [ -z "$(literals "$dir")" ] && [ -z "$(keys_sent "$dir")" ] \
+    || fail "a refused flag must send nothing to the agent"
+  pass "fm-control: profile, note, and fresh-session flags belong to relaunch only"
 }
 
 # --- 5. lifecycle states ----------------------------------------------------
@@ -1215,6 +1220,86 @@ EOF
   pass "fm-control-lib: only a runtime's own recorded session has a relaunch resume form"
 }
 
+# Whether a session reference continues a conversation, and whether --fresh may
+# set it aside, are decided from the reference and the filesystem alone, so
+# they are pinned here without a backend. Pi starts a new, empty session on a
+# path with no file (or an empty one) and writes it at that same path, which is
+# what makes "rename the file aside, launch on the same path" a new
+# conversation; an id reference names no file, so nothing can be moved for it.
+test_session_reference_resumes_only_an_existing_conversation() {
+  local root="$TMP_ROOT/session-resumes" got ref want
+  mkdir -p "$root/dir.jsonl"
+  printf '{"type":"session","id":"a"}\n' > "$root/live.jsonl"
+  : > "$root/empty.jsonl"
+  while IFS='|' read -r ref want; do
+    [ -n "$want" ] || continue
+    if fm_control_session_ref_resumes "$ref"; then got=resumes; else got=fresh; fi
+    [ "$got" = "$want" ] || fail "reference '$ref' should read '$want', got '$got'"
+  done <<EOF
+$root/live.jsonl|resumes
+$root/gone.jsonl|fresh
+$root/empty.jsonl|fresh
+$root/dir.jsonl|fresh
+01a0bdaa-c387-749d-966c-0dcd96a4b755|resumes
+$root/gone.jsonl/|resumes
+$root/sub/../gone.jsonl|resumes
+|fresh
+EOF
+  pass "fm-control-lib: a path is fresh only when it is plainly written and no conversation is there; an id always resumes"
+}
+
+test_fresh_session_check_moves_only_a_proven_session_file() {
+  local base="$TMP_ROOT/fresh-check" root session out rc ref want
+  root="$base/agent/sessions"
+  mkdir -p "$root/--wt--" "$base/elsewhere" "$base/agent/sessions-other"
+  session="$root/--wt--/2026-11-10T00-00-00-000Z_abc.jsonl"
+  printf '{"type":"session","id":"abc"}\n' > "$session"
+  ln -s "$session" "$root/--wt--/link.jsonl"
+  ln -s "$root/--wt--/gone.jsonl" "$root/--wt--/dangling.jsonl"
+  mkdir "$root/--wt--/dir.jsonl"
+  cp "$session" "$base/elsewhere/outside.jsonl"
+  cp "$session" "$base/agent/sessions-other/sibling.jsonl"
+  cp "$session" "$root/--wt--/notes.txt"
+  ln -s "$base/elsewhere" "$root/--escape--"
+  ln -s "$root" "$base/rootlink"
+  # (reference | expected status): 0 movable, 3 nothing there, 1 refused.
+  while IFS='|' read -r ref want; do
+    [ -n "$want" ] || continue
+    rc=0
+    out=$(fm_control_fresh_session_check "$ref" "$root") || rc=$?
+    [ "$rc" = "$want" ] || fail "fresh-session check of '$ref' should return $want, got $rc ($out)"
+    case "$rc" in
+      1) [ -n "$out" ] || fail "a refusal must say why ('$ref')" ;;
+      *) [ -z "$out" ] || fail "only a refusal prints a reason ('$ref': $out)" ;;
+    esac
+  done <<EOF
+$session|0
+$root/--wt--/gone.jsonl|3
+$root/--none--/gone.jsonl|3
+01a0bdaa-c387-749d-966c-0dcd96a4b755|1
+$root/--wt--/link.jsonl|1
+$root/--wt--/dangling.jsonl|1
+$root/--wt--/dir.jsonl|1
+$base/elsewhere/outside.jsonl|1
+$base/agent/sessions-other/sibling.jsonl|1
+$root/--wt--/notes.txt|1
+$root/--wt--/../--wt--/${session##*/}|1
+$root//--wt--/${session##*/}|1
+$session/|1
+$root/--wt--/./gone.jsonl|1
+$root/--escape--/outside.jsonl|1
+EOF
+  # The root is compared physically, so naming it through a symlink still works,
+  # and one that cannot be resolved refuses rather than matching nothing.
+  rc=0; fm_control_fresh_session_check "$session" "$base/rootlink" >/dev/null || rc=$?
+  [ "$rc" = 0 ] || fail "a sessions root named through a symlink should still contain its sessions, got $rc"
+  rc=0; fm_control_fresh_session_check "$session" "$base/no-such-root" >/dev/null || rc=$?
+  [ "$rc" = 1 ] || fail "an unresolvable sessions root must refuse, got $rc"
+  rc=0; fm_control_fresh_session_check "$session" "" >/dev/null || rc=$?
+  [ "$rc" = 1 ] || fail "an empty sessions root must refuse, got $rc"
+  pass "fm-control-lib: --fresh may set aside only a regular, non-symlink .jsonl file under the sessions root"
+}
+
 test_exit_types_each_harness_verified_command
 test_interrupt_sends_each_harness_verified_key
 test_devin_interrupt_invalidates_busy
@@ -1226,6 +1311,8 @@ test_opencode_interrupts_twice_and_others_once
 test_unverified_harness_is_refused
 test_harness_family_resolution
 test_relaunch_resume_flag_is_per_adapter_and_reference_owner
+test_session_reference_resumes_only_an_existing_conversation
+test_fresh_session_check_moves_only_a_proven_session_file
 test_prefixed_recorded_harness_reaches_each_control_verb
 test_backend_key_capability_matrix
 test_harness_kind_capability

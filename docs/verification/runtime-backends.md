@@ -2000,7 +2000,54 @@ Resuming the bound session instead makes the replacement's reports land, which i
 poll 8: {"agent_status":"working","session":".../2026-09-21T14-10-08-776Z_01a0c44d.jsonl"}
 ```
 
-The read that supplies the reference is `bin/backends/herdr.sh`'s `fm_backend_herdr_pane_agent_session_ref`, the per-harness rule is `bin/fm-control-lib.sh`'s `fm_control_relaunch_resume_flag`, and the launch argument is composed by `relaunch_resume_args` in `bin/fm-spawn.sh`; `docs/herdr-backend.md` "Agent status authority and relaunch" owns the contract. Nothing here changes `resume` as a control verb, and only a relaunch asks for it.
+The read that supplies the reference is `bin/backends/herdr.sh`'s `fm_backend_herdr_pane_agent_session_ref`, the per-harness rule is `bin/fm-control-lib.sh`'s `fm_control_relaunch_resume_flag`, that file's `fm_control_relaunch_resume_ref` joins the two, and the launch argument is composed by `relaunch_resume_args` in `bin/fm-spawn.sh`; `docs/herdr-backend.md` "Agent status authority and relaunch" owns the contract. Nothing here changes `resume` as a control verb, and only a relaunch asks for it.
+
+### A new conversation on the bound session path
+
+Read 2026-11-10 from the installed Pi 0.85.1 package (`@earendil-works/pi-coding-agent`) and from Herdr's Pi integration version 9 (`~/.pi/agent/extensions/herdr-agent-state.ts`, installed by Herdr 0.9.5).
+This is the basis for `bin/fm-control.sh <id> relaunch --fresh`; `docs/herdr-backend.md` "Resumed or fresh" owns the contract.
+
+What Pi does with `--session <argument>`:
+
+| Source | Fact |
+| --- | --- |
+| `dist/main.js` `resolveSessionPath` | An argument containing `/` or ending `.jsonl` is a path and goes straight to `SessionManager.open`; anything else is an id looked up among saved sessions, which exits with `No session found matching` when nothing matches and prompts to fork when the match belongs to another project. |
+| `dist/core/session-manager.js` `_setSessionFile` | A path with no file starts a new session with a new id and keeps the explicit path (`this.sessionFile = explicitPath`); an empty file does the same; a non-empty file that is not a Pi session throws. |
+| `dist/core/session-manager.js` `_persist` | The file is created on the first assistant message, exclusively (`openSync(..., "wx")`), so it must not reappear at that path in between. |
+| `dist/core/session-manager.js` `listSessionsFromDir` | Only `*.jsonl` entries are sessions. |
+| `dist/core/agent-session.js` | A process start emits `session_start` with reason `startup` whether or not the session file existed. |
+
+Running that class against a scratch directory, with no agent, model call, or terminal, and `PI_CODING_AGENT_DIR` pointed into the same directory, printed this (the probe's own labels; `P` is the explicit session path, and the last line's path is elided):
+
+```text
+1 missing: getSessionFile()===P: true
+1 missing: file exists before any turn: false
+1 missing: file exists after user message only: false
+1 missing: file exists after first assistant message: true
+1 missing: header id === in-memory id: true
+2 present: same session id (resumed): true
+2 present: messages restored: 2
+3 moved aside: getSessionFile()===P: true
+3 moved aside: new session id: true
+3 moved aside: messages in context: 0
+3 moved aside: file exists before any turn: false
+3 moved aside: new file created at exactly P: true
+3 moved aside: prior file untouched (old id): true
+4 list: entries: ["/sessions/--wt--/2026-11-10T00-00-00-000Z_bound.jsonl"]
+4 dir: files: ["2026-11-10T00-00-00-000Z_bound.jsonl","2026-11-10T00-00-00-000Z_bound.jsonl.prior-1794300000"]
+5 empty: messages in context: 0
+5 empty: header written at once: true
+6 junk: refused: Session file is not a valid pi session: <path>
+6 junk: content preserved: true
+```
+
+What Herdr is told: the integration's `updateSessionRef` takes `sessionManager.getSessionFile()` and, when that is an absolute path, sends `agent_session_path` alone; the session id is sent only when there is no path.
+Every Pi registration in a Herdr 0.9.5 saved layout read that day, 21 of 21, carried `kind: path` with `source: herdr:pi`.
+A replacement started on the bound path therefore sends the same pane, source, agent, start reason, and session path whether the file held a conversation or not.
+
+Not measured: that Herdr 0.9.5 keeps applying those reports after the file was renamed.
+It follows from the measurement above, in which Herdr applied a report exactly when its session reference matched the bound one, and from Herdr binding a fresh spawn's session before Pi has created that file.
+A live check needs an `fm-lab-` session with a real Pi under a nested shell: bind a session, `/quit`, rename the file, start `pi --session <same path>` on a slow turn, and read `agent get` for `working` with the unchanged session path.
 
 ### Away-mode transport
 

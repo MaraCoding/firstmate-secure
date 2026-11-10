@@ -17,6 +17,11 @@
 #   6. fm-spawn --relaunch refuses on its own: a live agent, a contradicting
 #      flag, an extra positional, or a backend that cannot prove the previous
 #      agent exited.
+#   7. The result says which conversation the replacement runs on
+#      (session=resumed|fresh, from what the launch owner recorded), and --fresh
+#      renames a bound Pi session aside to get a new one on the same path,
+#      refusing before the agent is touched when it cannot prove what it would
+#      move and putting the file back when the launch never started.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -2534,8 +2539,10 @@ case "${1:-} ${2:-}" in
     exit 0 ;;
   'pane process-info')
     # A retained registration with a shell-only pane models an exited agent
-    # whose Herdr status authority still belongs to its previous session.
-    if [ -f "$D/herdr-agent-registration" ]; then
+    # whose Herdr status authority still belongs to its previous session. Once a
+    # replacement has been launched into the pane, that registration is backed
+    # by a running process again.
+    if [ -f "$D/herdr-agent-registration" ] && [ ! -f "$D/herdr-agent-live" ]; then
       printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","shell_pid":4242,"foreground_processes":[]}}}\n' \
         "$(cat "$D/herdr-pane")"
     else
@@ -2685,6 +2692,312 @@ test_herdr_relaunch_resumes_only_the_registered_pi_session() {
     rc=0
   done
   pass "fm-spawn --relaunch: resumes the bound Pi session only for a Pi registration"
+}
+
+# --- which conversation the replacement runs on --------------------------------
+#
+# A Pi relaunch on Herdr hands the pane's bound session back as `--session`, so
+# Herdr keeps tracking the pane - and so the replacement keeps the previous
+# agent's whole conversation. The result line used to be identical either way,
+# and a supervisor reported a context reset that had in fact resumed at 447k
+# tokens. The launch owner now records which happened, and --fresh sets the
+# bound session file aside so the same path starts a new conversation
+# (docs/herdr-backend.md "Resumed or fresh").
+
+PI_SESSION=
+PI_SESSIONS_ROOT=
+
+# herdr_pi_registration <case-dir> <kind> <value>: the Pi registration Herdr
+# still holds for the pane after its agent exited.
+herdr_pi_registration() {
+  printf '{"result":{"agent":{"agent":"pi","agent_status":"idle","agent_session":{"agent":"pi","kind":"%s","source":"herdr:pi","value":"%s"}}}}\n' \
+    "$2" "$3" > "$1/fake/herdr-agent-registration"
+}
+
+# herdr_pi_case <name> <id>: a Pi ship task on herdr whose previous agent has
+# exited to its shell while Herdr keeps its registration - the shape every
+# relaunch of a Pi worker meets. Sets HERDR_CASE_DIR, PI_SESSIONS_ROOT (the Pi
+# sessions root of the throwaway HOME run_control uses) and PI_SESSION (a real
+# session file under it, which the registration names).
+herdr_pi_case() {
+  herdr_case_or_skip "$1" "$2" || return 1
+  rm -f "$HERDR_CASE_DIR/fake/herdr-stopped"
+  sed -i 's/^harness=claude$/harness=pi/' "$HERDR_CASE_DIR/home/state/$2.meta"
+  PI_SESSIONS_ROOT="$HERDR_CASE_DIR/user-home/.pi/agent/sessions"
+  mkdir -p "$PI_SESSIONS_ROOT/--wt--"
+  PI_SESSION="$PI_SESSIONS_ROOT/--wt--/2026-11-10T00-00-00-000Z_bound.jsonl"
+  printf '%s\n' '{"type":"session","id":"bound"}' '{"type":"message","id":"m1"}' > "$PI_SESSION"
+  herdr_pi_registration "$HERDR_CASE_DIR" path "$PI_SESSION"
+}
+
+# run_pi_control: run_control under Pi's default account root, whatever the
+# developer's own shell exports.
+run_pi_control() {  # <case-dir> <args...>
+  PI_CODING_AGENT_DIR='' run_control "$@"
+}
+
+test_relaunch_result_says_whether_the_conversation_resumed() {
+  local dir out rc command
+  herdr_pi_case session-outcome rl80 || {
+    echo "skip - herdr relaunch needs jq (the herdr adapter parses JSON with it)"
+    return 0
+  }
+  dir=$HERDR_CASE_DIR
+
+  out=$(run_pi_control "$dir" rl80 relaunch --note "continue the same work"); rc=$?
+  expect_code 0 "$rc" "a Pi relaunch on herdr should succeed"$'\n'"$out"
+  command=$(cat "$dir/fake/launched-command")
+  assert_contains "$command" "--session '$PI_SESSION'" \
+    "the replacement must be launched on the session Herdr bound to the pane"
+  assert_contains "$out" "relaunched rl80 harness=pi" "the outcome should name the transition"
+  assert_contains "$out" " session=resumed" \
+    "a replacement started on a session that holds a conversation must say it resumed"
+  [ "$(meta_field "$dir" rl80 relaunch_session)" = resumed ] \
+    || fail "the launch owner must record that the conversation resumed, got '$(meta_field "$dir" rl80 relaunch_session)'"
+  [ "$(journal_field "$dir" rl80 session)" = resumed ] \
+    || fail "the journal should record the outcome it reported"
+  [ -f "$PI_SESSION" ] || fail "a plain relaunch must leave the bound session where it is"
+
+  # The same binding with no file behind it: the path is still handed back, so
+  # Herdr keeps tracking the pane, but Pi starts an empty session there.
+  rm -f "$PI_SESSION" "$dir/fake/herdr-agent-live" "$dir/fake/launched-command"
+  out=$(run_pi_control "$dir" rl80 relaunch --note "the session file is gone"); rc=$?
+  expect_code 0 "$rc" "a relaunch onto a bound path with no file should succeed"$'\n'"$out"
+  assert_contains "$(cat "$dir/fake/launched-command")" "--session '$PI_SESSION'" \
+    "the bound path is still handed back when its file is gone"
+  assert_contains "$out" " session=fresh" \
+    "a bound path with no file starts a new conversation and must say so"
+  [ "$(meta_field "$dir" rl80 relaunch_session)" = fresh ] \
+    || fail "the recorded outcome should follow the launch, got '$(meta_field "$dir" rl80 relaunch_session)'"
+  [ "$(grep -c '^relaunch_session=' "$dir/home/state/rl80.meta")" = 1 ] \
+    || fail "each relaunch must replace the recorded outcome rather than stack another line"
+  pass "fm-control relaunch: the result and the record say whether the replacement resumed the conversation"
+}
+
+test_relaunch_that_cannot_resume_reports_a_fresh_session() {
+  local dir out rc
+  dir=$(new_case session-fresh rl86)
+  add_ship_task "$dir" rl86 claude
+  out=$(run_control "$dir" rl86 relaunch --note "claude never resumes"); rc=$?
+  expect_code 0 "$rc" "a claude relaunch should succeed"$'\n'"$out"
+  assert_contains "$out" " session=fresh" "a harness that never resumes must report a fresh session"
+  [ "$(meta_field "$dir" rl86 relaunch_session)" = fresh ] \
+    || fail "the launch owner must record the fresh session, got '$(meta_field "$dir" rl86 relaunch_session)'"
+  assert_not_contains "$out" "session_prior=" "nothing was set aside, so nothing should be named"
+  pass "fm-control relaunch: a harness with no resume form reports session=fresh"
+}
+
+# A relaunch rewrites the record around the lines it does not own, and a pr=
+# block among those has to stay the record's last lines: the PR identity parse
+# (bin/fm-pr-lib.sh's fm_pr_metadata_identity_parse) refuses any other key after
+# it. relaunch_session= is therefore written ahead of the preserved lines. Run
+# through the launch owner directly, the path on which nothing else follows them.
+test_relaunch_session_is_recorded_ahead_of_a_preserved_pr_block() {
+  local dir out rc=0 meta block
+  herdr_pi_case session-pr-order rl87 || {
+    echo "skip - herdr relaunch needs jq (the herdr adapter parses JSON with it)"
+    return 0
+  }
+  dir=$HERDR_CASE_DIR
+  meta="$dir/home/state/rl87.meta"
+  block=$(printf '%s\n' 'pr=https://github.com/example/repo/pull/87' \
+    'pr_head=0123456789abcdef0123456789abcdef01234567')
+  printf '%s\n' "$block" >> "$meta"
+  out=$(run_spawn "$dir" rl87 --relaunch --harness pi) || rc=$?
+  expect_code 0 "$rc" "a direct Pi relaunch should complete"$'\n'"$out"
+  [ "$(meta_field "$dir" rl87 relaunch_session)" = resumed ] \
+    || fail "the launch owner records the outcome on a direct relaunch too, got '$(meta_field "$dir" rl87 relaunch_session)'"
+  [ "$(tail -n 2 "$meta")" = "$block" ] \
+    || fail "a preserved pr= block must stay the record's last lines:"$'\n'"$(cat "$meta")"
+  (
+    # shellcheck source=bin/fm-pr-lib.sh
+    . "$ROOT/bin/fm-pr-lib.sh"
+    fm_pr_metadata_identity_parse "$meta"
+  ) || fail "the relaunched record no longer passes the PR identity parse"
+  pass "fm-spawn --relaunch: relaunch_session= is recorded ahead of a preserved pr= block, which stays last"
+}
+
+test_fresh_relaunch_sets_the_bound_session_aside_and_reuses_its_path() {
+  local dir out rc prior
+  herdr_pi_case fresh rl81 || {
+    echo "skip - herdr relaunch needs jq (the herdr adapter parses JSON with it)"
+    return 0
+  }
+  dir=$HERDR_CASE_DIR
+
+  out=$(run_pi_control "$dir" rl81 relaunch --fresh --note "shed the old context"); rc=$?
+  expect_code 0 "$rc" "a --fresh relaunch of a bound Pi session should succeed"$'\n'"$out"
+  assert_contains "$out" " session=fresh" "a --fresh relaunch must report a fresh session"
+  prior=$(printf '%s\n' "$out" | sed -n 's/^relaunched .* session_prior=//p' | tail -1)
+  case "$prior" in
+    "$PI_SESSION".prior-[0-9]*) ;;
+    *) fail "the result should name where the previous conversation went, got '$prior'"$'\n'"$out" ;;
+  esac
+  [ -f "$prior" ] && grep -q '"id":"bound"' "$prior" \
+    || fail "the previous conversation must be kept beside its old path, not deleted"
+  [ ! -e "$PI_SESSION" ] \
+    || fail "the bound path must be left free for Pi to start its new session on"
+  [ "$(find "$PI_SESSIONS_ROOT" -type f | wc -l | tr -d ' ')" = 1 ] \
+    || fail "exactly one file should exist under the sessions root after the rename"
+  assert_contains "$(cat "$dir/fake/launched-command")" "--session '$PI_SESSION'" \
+    "the replacement must launch on the SAME path, which is what keeps Herdr tracking the pane"
+  [ "$(meta_field "$dir" rl81 relaunch_session)" = fresh ] \
+    || fail "the launch owner must have seen an empty path, got '$(meta_field "$dir" rl81 relaunch_session)'"
+  [ "$(journal_field "$dir" rl81 session_prior)" = "$prior" ] \
+    || fail "the journal should record where the previous conversation was moved"
+  [ "$(journal_field "$dir" rl81 phase)" = complete ] || fail "the transaction should end complete"
+  pass "fm-control relaunch --fresh: the bound session is renamed aside and the same path starts a new conversation"
+}
+
+test_fresh_relaunch_refuses_before_the_agent_is_touched() {
+  local dir out rc shape before id
+  for shape in id symlink outside directory suffix; do
+    id="rf-$shape"
+    herdr_pi_case "fresh-refuse-$shape" "$id" || {
+      echo "skip - herdr relaunch needs jq (the herdr adapter parses JSON with it)"
+      return 0
+    }
+    dir=$HERDR_CASE_DIR
+    case "$shape" in
+      id)
+        herdr_pi_registration "$dir" id 01a0bdaa-c387-749d-966c-0dcd96a4b755
+        ;;
+      symlink)
+        mv "$PI_SESSION" "$PI_SESSIONS_ROOT/--wt--/real.jsonl"
+        ln -s "$PI_SESSIONS_ROOT/--wt--/real.jsonl" "$PI_SESSION"
+        ;;
+      outside)
+        mkdir -p "$dir/elsewhere"
+        mv "$PI_SESSION" "$dir/elsewhere/session.jsonl"
+        herdr_pi_registration "$dir" path "$dir/elsewhere/session.jsonl"
+        ;;
+      directory)
+        rm -f "$PI_SESSION"
+        mkdir "$PI_SESSION"
+        ;;
+      suffix)
+        mv "$PI_SESSION" "$PI_SESSIONS_ROOT/--wt--/notes.txt"
+        herdr_pi_registration "$dir" path "$PI_SESSIONS_ROOT/--wt--/notes.txt"
+        ;;
+    esac
+    before=$(cat "$dir/home/state/$id.meta")
+
+    out=$(run_pi_control "$dir" "$id" relaunch --fresh --note "must not get this far"); rc=$?
+    expect_code 1 "$rc" "--fresh must refuse a bound session it cannot prove is a movable Pi session ($shape)"$'\n'"$out"
+    assert_contains "$out" "--fresh" "the refusal should name the option it refuses ($shape)"
+    [ "$(cat "$dir/home/state/$id.meta")" = "$before" ] \
+      || fail "a refused --fresh must leave the durable record byte-identical ($shape)"
+    [ ! -e "$dir/fake/launched-command" ] || fail "a refused --fresh must launch nothing ($shape)"
+    assert_not_contains "$(cat "$dir/fake/herdr-log")" "pane send-text" \
+      "a refused --fresh must send nothing to the pane ($shape)"
+    [ ! -e "$dir/home/state/$id.control-relaunch" ] \
+      || fail "a refused --fresh must not open a relaunch transaction ($shape)"
+    [ -z "$(find "$dir" -name '*.prior-*' 2>/dev/null)" ] \
+      || fail "a refused --fresh must not rename anything ($shape)"
+    assert_not_contains "$(cat "$dir/home/data/$id/brief.md")" "must not get this far" \
+      "a refused --fresh must not append its note to the instructions ($shape)"
+  done
+  pass "fm-control relaunch --fresh: an id reference, a symlink, a file outside the sessions root, a directory, and a non-session file all refuse with nothing changed"
+}
+
+test_fresh_relaunch_changes_nothing_where_the_launch_is_fresh_anyway() {
+  local dir out rc
+  dir=$(new_case fresh-noop rl83)
+  add_ship_task "$dir" rl83 claude
+  out=$(run_control "$dir" rl83 relaunch --fresh --note "nothing to shed"); rc=$?
+  expect_code 0 "$rc" "--fresh on a harness that never resumes should succeed"$'\n'"$out"
+  assert_contains "$out" " session=fresh" "the launch was fresh and must say so"
+  assert_not_contains "$out" "session_prior=" "nothing was set aside on a harness that never resumes"
+
+  herdr_pi_case fresh-missing rl84 || {
+    echo "skip - herdr relaunch needs jq (the herdr adapter parses JSON with it)"
+    return 0
+  }
+  dir=$HERDR_CASE_DIR
+  rm -f "$PI_SESSION"
+  out=$(run_pi_control "$dir" rl84 relaunch --fresh --note "no file to set aside"); rc=$?
+  expect_code 0 "$rc" "--fresh with no file at the bound path should succeed"$'\n'"$out"
+  assert_contains "$out" " session=fresh" "a bound path with no file is already a fresh session"
+  assert_not_contains "$out" "session_prior=" "nothing existed to set aside"
+  assert_contains "$(cat "$dir/fake/launched-command")" "--session '$PI_SESSION'" \
+    "the bound path is still handed back so Herdr keeps tracking the pane"
+  [ -z "$(find "$PI_SESSIONS_ROOT" -type f 2>/dev/null)" ] \
+    || fail "--fresh must not create anything under the sessions root itself"
+  pass "fm-control relaunch --fresh: a no-op where the relaunch starts a fresh session anyway"
+}
+
+test_fresh_relaunch_puts_the_session_back_when_the_launch_never_started() {
+  local dir out rc real_mv
+  herdr_pi_case fresh-rollback rl85 || {
+    echo "skip - herdr relaunch needs jq (the herdr adapter parses JSON with it)"
+    return 0
+  }
+  dir=$HERDR_CASE_DIR
+  real_mv=$(command -v mv)
+  make_mv_failure_stub "$dir"
+  # The launch owner fails while publishing the replacement's record, which is
+  # before any launch line is delivered: no Pi was started on the emptied path.
+  out=$(FM_REAL_MV="$real_mv" FM_FAKE_META_PUBLISH_MV_FAIL="$dir/home/state/rl85.meta" \
+    run_pi_control "$dir" rl85 relaunch --fresh --note "this launch will not publish"); rc=$?
+  expect_code 1 "$rc" "a failed publication should fail the relaunch"$'\n'"$out"
+  [ "$(journal_field "$dir" rl85 rollback)" = prior-record-kept ] \
+    || fail "the launch should have failed before publication, got '$(journal_field "$dir" rl85 rollback)'"
+  [ -f "$PI_SESSION" ] && grep -q '"id":"bound"' "$PI_SESSION" \
+    || fail "an unpublished --fresh relaunch must put the previous conversation back"
+  [ -z "$(find "$PI_SESSIONS_ROOT" -name '*.prior-*' 2>/dev/null)" ] \
+    || fail "nothing should be left renamed after the session was put back"
+  [ ! -e "$dir/fake/launched-command" ] || fail "fixture: no launch should have been delivered"
+  assert_contains "$out" "previous conversation" "the failure should say what happened to the conversation"
+  pass "fm-control relaunch --fresh: a launch that never started gets its session file back"
+}
+
+# Under a worker account pin the replacement's Pi runs on the pinned root, so
+# that root's sessions directory - not the default one - is where --fresh may
+# find the bound session.
+test_fresh_relaunch_looks_under_the_pinned_pi_account_root() {
+  local dir out rc acct pinned
+  herdr_pi_case fresh-pinned rl88 || {
+    echo "skip - herdr relaunch needs jq (the herdr adapter parses JSON with it)"
+    return 0
+  }
+  dir=$HERDR_CASE_DIR
+  acct="$dir/acct"
+  cat > "$dir/fakebin/pi" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  --help) printf 'Options: --tui-mode\n' ;;
+  auth)
+    if grep -qx "$4" "$PI_CODING_AGENT_DIR/signed-in" 2>/dev/null; then
+      printf '{"status":"ready"}\n'
+    else
+      printf '{"status":"not_ready","reason":"credentials_not_configured"}\n'
+      exit 1
+    fi ;;
+esac
+SH
+  chmod +x "$dir/fakebin/pi"
+  mkdir -p "$dir/home/config" "$acct/sessions/--wt--"
+  printf 'openai-codex\n' > "$acct/signed-in"
+  printf '%s\nopenai-codex\n' "$acct" > "$dir/home/config/pi-account"
+
+  # The bound session sits under the DEFAULT root, which is not the account the
+  # replacement launches under: refused, with nothing touched.
+  out=$(run_pi_control "$dir" rl88 relaunch --fresh --model openai-codex/gpt-5.5 --note "wrong root"); rc=$?
+  expect_code 1 "$rc" "a bound session outside the pinned account's sessions root must refuse"$'\n'"$out"
+  assert_contains "$out" "is not under Pi's sessions root '$acct/sessions'" \
+    "the refusal should name the pinned root it looked under"
+  [ -f "$PI_SESSION" ] || fail "a refused --fresh must leave the session where it is"
+  [ ! -e "$dir/fake/launched-command" ] || fail "a refused --fresh must launch nothing"
+
+  pinned="$acct/sessions/--wt--/bound.jsonl"
+  mv "$PI_SESSION" "$pinned"
+  herdr_pi_registration "$dir" path "$pinned"
+  out=$(run_pi_control "$dir" rl88 relaunch --fresh --model openai-codex/gpt-5.5 --note "pinned root"); rc=$?
+  expect_code 0 "$rc" "--fresh under an account pin should succeed"$'\n'"$out"
+  assert_contains "$out" " session=fresh session_prior=$pinned.prior-" \
+    "the session under the pinned root should have been set aside"
+  [ ! -e "$pinned" ] || fail "the bound path under the pinned root must be left free"
+  pass "fm-control relaunch --fresh: the bound session is looked for under the pinned Pi account root"
 }
 
 test_herdr_reclaim_adopts_a_pane_that_outlived_its_server() {
@@ -3086,6 +3399,14 @@ test_tmux_refuses_a_session_that_cannot_be_found
 test_tmux_refuses_when_the_server_is_gone
 test_reclaim_refuses_an_unreadable_endpoint
 test_herdr_relaunch_resumes_only_the_registered_pi_session
+test_relaunch_result_says_whether_the_conversation_resumed
+test_relaunch_that_cannot_resume_reports_a_fresh_session
+test_relaunch_session_is_recorded_ahead_of_a_preserved_pr_block
+test_fresh_relaunch_sets_the_bound_session_aside_and_reuses_its_path
+test_fresh_relaunch_refuses_before_the_agent_is_touched
+test_fresh_relaunch_changes_nothing_where_the_launch_is_fresh_anyway
+test_fresh_relaunch_puts_the_session_back_when_the_launch_never_started
+test_fresh_relaunch_looks_under_the_pinned_pi_account_root
 test_herdr_reclaim_adopts_a_pane_that_outlived_its_server
 test_herdr_exit_reports_already_stopped_when_the_pane_outlived_its_server
 test_herdr_rebind_stays_in_the_recorded_session

@@ -3051,7 +3051,8 @@ muse_credential_present() {
 
 # relaunch_resume_args: the launch arguments that keep a RELAUNCH bound to the
 # agent session this endpoint's runtime already reports, so the runtime's own
-# status authority survives the replacement.
+# status authority survives the replacement, and whether that hands the
+# replacement the previous agent's conversation.
 #
 # Why this exists, and why it is relaunch-only: some runtimes bind a pane's
 # agent status to one session identity and ignore reports carrying another (the
@@ -3065,13 +3066,23 @@ muse_credential_present() {
 # The reference is read from the endpoint's own runtime record, never guessed
 # from what looks recent, and only for an adapter with a verified resume form
 # whose own agent label reported it
-# (bin/fm-control-lib.sh's fm_control_relaunch_resume_flag owns both rules, and
-# bin/backends/herdr.sh's fm_backend_herdr_pane_agent_session_ref owns the
-# read). Every other combination prints nothing, so the launch stays exactly
-# what it was before this existed: a fresh session.
+# (bin/fm-control-lib.sh's fm_control_relaunch_resume_ref owns the read and
+# fm_control_relaunch_resume_flag the per-adapter rule, over
+# bin/backends/herdr.sh's fm_backend_herdr_pane_agent_session_ref). Every other
+# combination leaves both results at their defaults, so the launch stays
+# exactly what it was before this existed: a fresh session.
 #
-# Prints the arguments with the single leading space that appends them to the
-# launch line, so an empty result leaves every other launch byte-identical.
+# Sets two variables rather than printing, because its caller needs both:
+#   RESUME_ARGS       the arguments, with the single leading space that
+#                     appends them to the launch line, so an empty value
+#                     leaves every other launch byte-identical.
+#   RELAUNCH_SESSION  resumed when that reference holds a conversation, fresh
+#                     otherwise - which includes a bound path whose file is
+#                     gone, where Pi starts an empty session on the same path
+#                     (fm_control_session_ref_resumes owns the test). It is
+#                     recorded as relaunch_session= in the task's record, which
+#                     is how bin/fm-control.sh can say whether a relaunch kept
+#                     the previous agent's context instead of assuming it.
 #
 # Only the Herdr backend is asked: it is the one adapter whose runtime records a
 # per-pane agent session, and on every other backend the pane carries no such
@@ -3080,16 +3091,15 @@ muse_credential_present() {
 # fresh-session launch rather than refusing, because nothing here is a safety
 # property; it preserves a display and supervision signal.
 relaunch_resume_args() {  # <harness> <backend> <target>
-  local harness=${1-} backend=${2-} target=${3-} identity agent ref flag
-  [ "$backend" = herdr ] || return 0
-  [ -n "$target" ] || return 0
-  fm_backend_herdr_parse_target "$target" || return 0
-  identity=$(fm_backend_herdr_pane_agent_session_ref "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE") || return 0
-  agent=${identity%%$'\t'*}
-  ref=${identity#*$'\t'}
-  flag=$(fm_control_relaunch_resume_flag "$harness" "$agent") || return 0
-  [ -n "$flag" ] && [ -n "$ref" ] || return 0
-  printf -- ' %s %s' "$flag" "$(shell_quote "$ref")"
+  local pair ref
+  RESUME_ARGS=
+  RELAUNCH_SESSION=fresh
+  pair=$(fm_control_relaunch_resume_ref "${1-}" "${2-}" "${3-}") || return 0
+  [ -n "$pair" ] || return 0
+  ref=${pair#*$'\t'}
+  RESUME_ARGS=" ${pair%%$'\t'*} $(shell_quote "$ref")"
+  ! fm_control_session_ref_resumes "$ref" || RELAUNCH_SESSION=resumed
+  return 0
 }
 
 model_flag_for_harness() {
@@ -5984,6 +5994,26 @@ else
   fi
 fi
 
+# Relaunch session continuity. Resolved here, where the adopted endpoint (T) is
+# known and before the record below is prepared, because that record states
+# whether the replacement continues the previous conversation
+# (relaunch_session=). The arguments are substituted further down, and only
+# into the Pi-family template's `__PIRESUME__` placeholder: a launch line
+# without it (a raw command) is passed nothing, so it resumes nothing whatever
+# the pane's registration says.
+RESUME_ARGS=
+RELAUNCH_SESSION=
+if [ "$RELAUNCH" -eq 1 ]; then
+  relaunch_resume_args "$HARNESS" "$BACKEND" "$T"
+  case "$LAUNCH" in
+  *__PIRESUME__*) ;;
+  *)
+    RESUME_ARGS=
+    RELAUNCH_SESSION=fresh
+    ;;
+  esac
+fi
+
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
 SPAWN_GEN="s$(date +%s).${BASHPID:-$$}.$RANDOM"
@@ -6003,7 +6033,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp base_branch upstream_consent forge backup_remote backup_prefix model effort account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id paseo_terminal_id paseo_workspace_id rex_server rex_session_id rex_window_id rex_block_id home projects control_relaunch_tx polytoken_session polytoken_port polytoken_credential", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp base_branch upstream_consent forge backup_remote backup_prefix model effort account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id paseo_terminal_id paseo_workspace_id rex_server rex_session_id rex_window_id rex_block_id home projects control_relaunch_tx relaunch_session polytoken_session polytoken_port polytoken_credential", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -6072,6 +6102,13 @@ preserve_relaunch_meta() {
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"
   fi
+  # Whether the replacement continues the previous conversation
+  # (relaunch_resume_args above). Written by a relaunch only, so a fresh
+  # spawn's record stays byte-identical, and ahead of the preserved lines: a
+  # pr= block among them has to stay the record's last lines
+  # (bin/fm-pr-lib.sh's fm_pr_metadata_identity_parse refuses any other key
+  # after it).
+  [ -z "$RELAUNCH_SESSION" ] || echo "relaunch_session=$RELAUNCH_SESSION"
   if [ "$RELAUNCH" -eq 1 ]; then
     preserve_relaunch_meta
   fi
@@ -6183,13 +6220,9 @@ MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT" "$MODEL") || exit 1
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
-# Relaunch session continuity. Computed here, where the adopted endpoint (T) is
-# known, and substituted only into the Pi-family template's `__PIRESUME__`
-# placeholder; an empty value leaves every other launch byte-identical.
-RESUME_ARGS=
-if [ "$RELAUNCH" -eq 1 ]; then
-  RESUME_ARGS=$(relaunch_resume_args "$HARNESS" "$BACKEND" "$T") || RESUME_ARGS=
-fi
+# Relaunch session continuity: RESUME_ARGS was resolved before the task record
+# was prepared (above). It is empty on every fresh spawn and for every other
+# harness, which leaves those launches byte-identical.
 LAUNCH=${LAUNCH//__PIRESUME__/$RESUME_ARGS}
 LAUNCH=${LAUNCH//__CLAUDEPERMFLAG__/$CLAUDE_PERM_FLAG}
 case "$LAUNCH" in

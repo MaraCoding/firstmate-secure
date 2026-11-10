@@ -24,7 +24,7 @@
 # Output is one stable, parseable, token-tight line firstmate can read every
 # heartbeat:
 #
-#   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|remote-endpoint|none> · <detail>
+#   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|remote-endpoint|restored-after-boot|none> · <detail>
 #
 # Logic, in order:
 #   1. Resolve worktree + backend target + kind from state/<id>.meta. A meta
@@ -148,6 +148,14 @@
 #      backend's pane busy state, then the resolved status declaration
 #      when its verb maps to a recognized run-state. Decision-only events such as
 #      `resolved` never become current state or detail.
+#      Before either is read, a live endpoint whose armed busy incarnation
+#      belongs to an EARLIER host boot reports unknown · restored-after-boot: a
+#      terminal backend restored the endpoint after a host restart, so the busy
+#      record and the status log are a dead agent's, and whatever runs there
+#      now was not launched by the fleet. bin/fm-busy-lib.sh's
+#      fm_busy_incarnation_restored owns the evidence and stays silent whenever
+#      it cannot tell; the detail names the evidence and the repair
+#      (bin/fm-control.sh <id> relaunch).
 #   5. Missing meta or torn-down worktree: report unknown · none. If no run is
 #      attributed to this crew, a dead endpoint also reports unknown · none rather
 #      than trusting a stale status log. On tmux, herdr, and rex, which own a
@@ -1344,6 +1352,25 @@ if ! pane_readable "$BACKEND_TARGET"; then
       emit unknown none "backend target gone: $BACKEND_TARGET"
       ;;
   esac
+fi
+
+# The endpoint is alive, which is not yet the same as the fleet's own agent
+# being in it. A terminal backend that restores its layout after a host restart
+# puts a NEW agent into the endpoint - Herdr re-runs a bare `pi --session` or
+# `claude --resume` - while the busy record and the status log read below still
+# hold the dead incarnation's last words. Trusting either would report that
+# stand-in as its healthy predecessor (`paused`, or `working` off a record
+# nothing will ever settle), and it has none of the fleet's launch environment
+# to be steered through. bin/fm-busy-lib.sh's fm_busy_incarnation_restored owns
+# the evidence and every case in which it stays silent, and the repair is the
+# ordinary relaunch, which arms a new incarnation in this boot. Ahead of the
+# secondmate split below, because a restored mate is degraded the same way.
+if RESTORED_EVIDENCE=$(fm_busy_incarnation_restored "$META" "$ID" "$STATE"); then
+  case "$RESTORED_EVIDENCE" in
+    boot-id) RESTORED_WHY="armed in an earlier boot (boot id changed)" ;;
+    *) RESTORED_WHY="armed before this boot (busy generation predates it; no boot record, clock-based)" ;;
+  esac
+  emit unknown restored-after-boot "$RESTORED_WHY: whatever runs in this endpoint was not launched by the fleet${SEP}repair: bin/fm-control.sh $ID relaunch"
 fi
 
 # Secondmates idle on their own watcher (idle pane = healthy), so the busy

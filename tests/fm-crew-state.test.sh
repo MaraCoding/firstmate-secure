@@ -43,6 +43,12 @@
 #       failed.
 #   (m) FM_CREW_STATE_*_OVERRIDE guard: a mismatched-basename override is
 #       ignored, a matching one is honoured.
+#   (n) an endpoint that outlived a host restart: a live pane whose armed
+#       incarnation belongs to an earlier boot reads unknown/restored-after-boot
+#       for ships, scouts, and secondmates, never the dead incarnation's busy
+#       record or status log; an unbound gen, a platform with no boot id, a dead
+#       endpoint, and an attributed run are unchanged, and a gen armed before
+#       the boot binding existed is judged by both boot clocks, not btime alone.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -5639,6 +5645,219 @@ test_legacy_conflicting_run_records_report_unknown() {
   pass 'legacy conflicting run records report unknown'
 }
 
+# --- an endpoint that outlived a host restart ---------------------------------
+#
+# After a host restart every agent the fleet launched is gone, but a terminal
+# backend that restores its layout puts a NEW agent into each saved endpoint
+# (Herdr 0.9.5 re-runs a bare `pi --session` or `claude --resume`). The endpoint
+# reads alive while the busy record and the status log still hold the dead
+# incarnation's last words: on 2026-11-09 this reader answered `paused` for such
+# agents and a supervisor steered one. The armed gen is bound to its host boot
+# (bin/fm-busy-lib.sh), and crew-state must answer unknown with the reason,
+# never the stale log or record.
+# Each case arms through the real writer against a fake /proc, then reads again
+# under another boot id, so the host boot is the only thing that differs.
+
+RESTORED_T0=1794293642   # the fixture boot's first second, for the legacy case
+
+# restored_arm <case-dir> <id>: arm <id> in boot "boot-a" and print its gen.
+restored_arm() {
+  mkdir -p "$1/proc/sys/kernel/random" "$1/run"
+  printf 'boot-a\n' > "$1/proc/sys/kernel/random/boot_id"
+  FM_PROC_ROOT_OVERRIDE="$1/proc" "$ROOT/bin/fm-busy-event.sh" arm "$1/state" "$2"
+}
+
+# restored_read <case-dir> <id> <host-boot-id>: crew-state as that boot sees it.
+restored_read() {
+  printf '%s\n' "$3" > "$1/proc/sys/kernel/random/boot_id"
+  FM_PROC_ROOT_OVERRIDE="$1/proc" FM_RUN_ROOT_OVERRIDE="$1/run" run_crew_state "$1" "$2"
+}
+
+test_restored_idle_worker_reads_unknown_not_its_stale_pause() {
+  reset_fakes
+  local d gen out
+  d=$(new_case restored-paused)
+  make_repo_on_branch "$d/wt" fm/feat-restored
+  make_fakebin "$d" >/dev/null
+  gen=$(restored_arm "$d" feat-restored)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-restored idle --gen "$gen" \
+    --source pi-ext --event agent-settled
+  fm_write_meta "$d/state/feat-restored.meta" "window=fm:fm-feat-restored" "worktree=$d/wt" \
+    "kind=ship" "harness=pi" "busy_gen=$gen"
+  printf 'paused: waiting on the queued build until 2026-11-10T07:00Z\n' > "$d/state/feat-restored.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_BUSY=0
+
+  out=$(restored_read "$d" feat-restored boot-a)
+  assert_contains "$out" "state: paused" "the boot that armed the worker keeps its declared pause"
+  assert_contains "$out" "source: status-log" "the boot that armed the worker still reads the status log"
+
+  out=$(restored_read "$d" feat-restored boot-b)
+  assert_contains "$out" "state: unknown" "an endpoint that outlived a host restart must read unknown"
+  assert_contains "$out" "source: restored-after-boot" "the unknown verdict must name its reason as the source"
+  assert_not_contains "$out" "paused" "the dead incarnation's pause must not be reported"
+  assert_not_contains "$out" "queued build" "the dead incarnation's status note must not leak into the detail"
+  assert_contains "$out" "boot id changed" "the detail names the exact evidence"
+  assert_contains "$out" "bin/fm-control.sh feat-restored relaunch" "the detail names the repair"
+
+  # The one switch puts the previous answer back, for whoever needs it off.
+  out=$(FM_BUSY_BOOT_CHECK=off restored_read "$d" feat-restored boot-b)
+  assert_contains "$out" "state: paused" "FM_BUSY_BOOT_CHECK=off must restore the previous answer"
+  assert_contains "$out" "source: status-log" "FM_BUSY_BOOT_CHECK=off must read the status log again"
+  pass "a worker restored after a host restart reads unknown/restored-after-boot, not its stale pause"
+}
+
+test_restored_worker_is_never_working_from_its_dead_record() {
+  reset_fakes
+  local d gen out
+  d=$(new_case restored-busy)
+  make_repo_on_branch "$d/wt" fm/feat-midturn
+  make_fakebin "$d" >/dev/null
+  gen=$(restored_arm "$d" feat-midturn)
+  # The host went down mid-turn: nothing will ever settle this record.
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-midturn busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+  fm_write_meta "$d/state/feat-midturn.meta" "window=fm:fm-feat-midturn" "worktree=$d/wt" \
+    "kind=ship" "harness=claude" "busy_gen=$gen"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_BUSY=1
+
+  out=$(restored_read "$d" feat-midturn boot-a)
+  assert_contains "$out" "state: working" "the boot that armed the worker reads its busy record"
+  out=$(restored_read "$d" feat-midturn boot-b)
+  assert_not_contains "$out" "state: working" "a record left busy by a dead incarnation must not read working"
+  assert_contains "$out" "source: restored-after-boot" "the restored endpoint is named instead"
+  # The watcher absorbs a stale pane only on a working or paused verdict here,
+  # so a restored endpoint must give it neither.
+  [ "$(PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" FM_PROC_ROOT_OVERRIDE="$d/proc" \
+    FM_RUN_ROOT_OVERRIDE="$d/run" crew_absorb_class feat-midturn)" = none ] \
+    || fail "a restored endpoint must not be absorbed as provably working or paused"
+  pass "a worker restored mid-turn never reads working off the record its dead predecessor left"
+}
+
+test_restored_secondmate_and_scout_read_unknown_too() {
+  reset_fakes
+  local d gen out
+  d=$(new_case restored-mate)
+  mkdir -p "$d/wt"
+  make_fakebin "$d" >/dev/null
+  gen=$(restored_arm "$d" mate)
+  fm_write_meta "$d/state/mate.meta" "window=fm:fm-mate" "worktree=$d/wt" "kind=secondmate" \
+    "harness=claude" "home=$d/wt" "busy_gen=$gen"
+  printf 'working: reconciling routed items\n' > "$d/state/mate.status"
+  FM_FAKE_AXI_STATUS=""
+  out=$(restored_read "$d" mate boot-a)
+  assert_contains "$out" "source: status-log" "a secondmate armed in this boot still reads its status log"
+  out=$(restored_read "$d" mate boot-b)
+  assert_contains "$out" "state: unknown" "a restored secondmate must read unknown"
+  assert_contains "$out" "source: restored-after-boot" "a restored secondmate names the reason"
+  assert_not_contains "$out" "reconciling routed items" "a restored secondmate must not report its stale log"
+
+  d=$(new_case restored-scout)
+  make_repo_on_branch "$d/wt" fm/scout-restored
+  make_fakebin "$d" >/dev/null
+  gen=$(restored_arm "$d" scout-restored)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" scout-restored idle --gen "$gen" \
+    --source claude-hook --event stop
+  fm_write_meta "$d/state/scout-restored.meta" "window=fm:fm-scout-restored" "worktree=$d/wt" \
+    "kind=scout" "harness=claude" "busy_gen=$gen"
+  printf 'needs-decision: which of the two designs?\n' > "$d/state/scout-restored.status"
+  out=$(restored_read "$d" scout-restored boot-a)
+  assert_contains "$out" "state: parked" "a scout armed in this boot still reads its open decision"
+  out=$(restored_read "$d" scout-restored boot-b)
+  assert_contains "$out" "source: restored-after-boot" "a restored scout names the reason"
+  assert_not_contains "$out" "state: parked" "a restored scout must not report its stale decision as current"
+  pass "a restored secondmate and a restored scout both read unknown/restored-after-boot"
+}
+
+# The check answers only for an endpoint that is alive and for the incarnation
+# the record itself names; everything else keeps the answer it had before.
+test_restored_check_does_not_fire_outside_its_evidence() {
+  reset_fakes
+  local d gen out
+  d=$(new_case restored-scope)
+  make_repo_on_branch "$d/wt" fm/feat-scope
+  make_fakebin "$d" >/dev/null
+  gen=$(restored_arm "$d" feat-scope)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-scope idle --gen "$gen" \
+    --source claude-hook --event stop
+  printf 'working: implementing\n' > "$d/state/feat-scope.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_BUSY=0
+
+  # A record that names no busy gen: the gen file is some earlier incarnation's
+  # leftover (a relaunch onto an adapter with no busy wiring drops busy_gen=).
+  fm_write_meta "$d/state/feat-scope.meta" "window=fm:fm-feat-scope" "worktree=$d/wt" \
+    "kind=ship" "harness=claude"
+  out=$(restored_read "$d" feat-scope boot-b)
+  assert_contains "$out" "source: status-log" "a gen the record does not name must not be judged"
+
+  fm_write_meta "$d/state/feat-scope.meta" "window=fm:fm-feat-scope" "worktree=$d/wt" \
+    "kind=ship" "harness=claude" "busy_gen=$gen"
+  # No boot id on this platform: cannot tell, so the answer is today's.
+  rm -f "$d/proc/sys/kernel/random/boot_id"
+  out=$(FM_PROC_ROOT_OVERRIDE="$d/proc" FM_RUN_ROOT_OVERRIDE="$d/run" run_crew_state "$d" feat-scope)
+  assert_contains "$out" "source: status-log" "a platform with no boot id must behave exactly as before"
+
+  # A dead endpoint is still reported as gone, not as restored.
+  FM_FAKE_TMUX_MISSING=1
+  out=$(restored_read "$d" feat-scope boot-b)
+  assert_contains "$out" "backend target gone" "a dead endpoint keeps its own verdict"
+  assert_not_contains "$out" "restored-after-boot" "a dead endpoint is not a restored one"
+  FM_FAKE_TMUX_MISSING=0
+
+  # An attributed run still answers first: the pipeline's verdict does not
+  # depend on which agent sits in the pane.
+  printf 'done: PR https://github.com/o/r/pull/3 checks green\n' > "$d/state/feat-scope.status"
+  FM_FAKE_AXI_STATUS="$(run_passed fm/feat-scope)"
+  out=$(restored_read "$d" feat-scope boot-b)
+  assert_contains "$out" "source: run-step" "an attributed run keeps answering for a restored endpoint"
+  pass "the restored check is silent for an unbound gen, a platform with no boot id, a dead endpoint, and an attributed run"
+}
+
+# A task armed before the boot binding existed has only its gen's mint second.
+# /proc/stat's btime drifts late (20 minutes after 9 hours on a WSL2 host), so it
+# is believed only together with the oldest mtime in /run, which does not move.
+restored_legacy_task() {  # <case-dir> <id> <mint-epoch>
+  local gen="g$3.4242.7"
+  rm -f "$1/state/$2".busy-*
+  printf '%s\n' "$gen" > "$1/state/$2.busy-gen"
+  printf 'v1 gen=%s seq=2 state=idle source=pi-ext event=agent-settled ts=%s\n' "$gen" "$3" \
+    > "$1/state/$2.busy-state"
+  fm_write_meta "$1/state/$2.meta" "window=fm:fm-$2" "worktree=$1/wt" "kind=ship" "harness=pi" \
+    "busy_gen=$gen"
+}
+
+test_restored_legacy_gen_is_judged_by_both_boot_clocks() {
+  reset_fakes
+  local d out
+  d=$(new_case restored-legacy)
+  make_repo_on_branch "$d/wt" fm/feat-legacy
+  make_fakebin "$d" >/dev/null
+  mkdir -p "$d/proc/sys/kernel/random" "$d/run"
+  printf 'boot-b\n' > "$d/proc/sys/kernel/random/boot_id"
+  # This boot began at RESTORED_T0; btime has drifted 1229 s late since.
+  printf 'cpu  1 2 3 4\nbtime %s\n' "$((RESTORED_T0 + 1229))" > "$d/proc/stat"
+  : > "$d/run/initctl"
+  fm_touch_epoch "$RESTORED_T0" "$d/run/initctl"
+  printf 'paused: waiting on the queued build\n' > "$d/state/feat-legacy.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_BUSY=0
+
+  restored_legacy_task "$d" feat-legacy "$((RESTORED_T0 - 7200))"
+  out=$(FM_PROC_ROOT_OVERRIDE="$d/proc" FM_RUN_ROOT_OVERRIDE="$d/run" run_crew_state "$d" feat-legacy)
+  assert_contains "$out" "source: restored-after-boot" "a legacy gen minted before this boot reads restored"
+  assert_contains "$out" "clock-based" "the detail says the legacy evidence is a clock comparison"
+  assert_not_contains "$out" "state: paused" "a legacy restored worker must not report its stale pause"
+
+  # Armed ten minutes INTO this boot: before the drifted btime, after the real boot.
+  restored_legacy_task "$d" feat-legacy "$((RESTORED_T0 + 600))"
+  out=$(FM_PROC_ROOT_OVERRIDE="$d/proc" FM_RUN_ROOT_OVERRIDE="$d/run" run_crew_state "$d" feat-legacy)
+  assert_contains "$out" "state: paused" "a worker armed in this boot must keep its answer under btime drift"
+  assert_contains "$out" "source: status-log" "btime drift alone must never call a live worker restored"
+  pass "a legacy gen is called restored only when it predates both btime and the /run boot stamp"
+}
+
 # Captured AXI stdout is a serialized input contract, not implementation source.
 # Only the run identity is rebound to each disposable git repository; status,
 # outcome, steps, findings, and gate bytes stay as emitted. The capture README
@@ -5956,5 +6175,10 @@ test_competing_live_runs_report_unknown_with_both_ids
 test_newer_failed_run_is_not_hidden_by_older_live_run
 test_unverifiable_run_selection_reports_unknown
 test_legacy_conflicting_run_records_report_unknown
+test_restored_idle_worker_reads_unknown_not_its_stale_pause
+test_restored_worker_is_never_working_from_its_dead_record
+test_restored_secondmate_and_scout_read_unknown_too
+test_restored_check_does_not_fire_outside_its_evidence
+test_restored_legacy_gen_is_judged_by_both_boot_clocks
 
 echo "all fm-crew-state tests passed"

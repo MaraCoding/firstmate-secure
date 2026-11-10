@@ -13,9 +13,13 @@
 # here rather than improvised per harness in agent prose.
 #
 # This file owns three capability tables plus their pure artifact-path tables,
-# and ONE named exception to that purity - fm_control_endpoint_absence_verdict,
+# and TWO named exceptions to that purity: fm_control_endpoint_absence_verdict,
 # the single owner of the per-backend endpoint-absence proof, which does run
-# backend reads. Everything else has no side effects, runs no backend command,
+# backend reads; and the relaunch session read - fm_control_relaunch_resume_ref
+# with its two file checks, fm_control_session_ref_resumes and
+# fm_control_fresh_session_check - the single owner of which conversation a
+# relaunch continues, which reads the endpoint's registration and the session
+# file it names. Everything else has no side effects, runs no backend command,
 # and reads no state, so sourcing this file is still free and the tables can be
 # read by a test as a pure contract:
 #
@@ -302,6 +306,144 @@ fm_control_relaunch_resume_flag() {  # <harness> <registered-agent>
   case "${1-}" in
     pi|pi-signed)
       [ "${2-}" = pi ] && printf -- '--session'
+      ;;
+  esac
+  return 0
+}
+
+# fm_control_relaunch_resume_ref: which session a relaunch of <harness> on
+# <backend> <target> resumes, printed as "<flag>\t<reference>", or nothing when
+# the replacement starts a fresh session anyway.
+#
+# One owner, two readers. The launch owner (bin/fm-spawn.sh's
+# relaunch_resume_args) turns it into the launch arguments and records what it
+# means for the conversation; bin/fm-control.sh reads it before a --fresh
+# relaunch, to decide - while nothing has been stopped yet - whether there is a
+# session to set aside and whether it may be. Both must reach the same answer,
+# so neither composes it for itself.
+#
+# Only the Herdr backend is asked: it is the one adapter whose runtime records
+# a per-pane agent session, and on every other backend the pane carries no such
+# identity for a replacement to preserve. An unreadable registration - no
+# agent, a stale one, a malformed reference, a pane that is gone - prints
+# nothing rather than failing, because nothing here is a safety property; it
+# preserves a display and supervision signal. A tab separates the two fields so
+# a reference with spaces in it still splits unambiguously.
+# Requires fm-backend.sh to be sourced.
+fm_control_relaunch_resume_ref() {  # <harness> <backend> <target>
+  local harness=${1-} backend=${2-} target=${3-} identity agent ref flag
+  [ "$backend" = herdr ] || return 0
+  [ -n "$target" ] || return 0
+  fm_backend_source herdr 2>/dev/null || return 0
+  fm_backend_herdr_parse_target "$target" || return 0
+  identity=$(fm_backend_herdr_pane_agent_session_ref "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE") || return 0
+  agent=${identity%%$'\t'*}
+  ref=${identity#*$'\t'}
+  flag=$(fm_control_relaunch_resume_flag "$harness" "$agent") || return 0
+  [ -n "$flag" ] && [ -n "$ref" ] || return 0
+  printf '%s\t%s' "$flag" "$ref"
+}
+
+# fm_control_session_ref_resumes: 0 when launching on <reference> continues an
+# existing conversation, 1 when it starts an empty one.
+#
+# Handing a session reference back is not the same as resuming a conversation.
+# Pi given `--session <path>` for a path with no file, or with an empty one,
+# starts a NEW session and writes it at exactly that path on its first answer
+# (read from pi-coding-agent 0.85.1's own SessionManager and confirmed by
+# running it: docs/verification/runtime-backends.md "A new conversation on the
+# bound session path"). So a path reference resumes only when a non-empty
+# regular file is there. An id reference always resumes: Pi resolves it among
+# its saved sessions and refuses to start when nothing matches. A path that is
+# not plainly written also reads as resuming: the runtime normalizes what the
+# kernel does not (a trailing slash, a `..`), so a file test on the raw string
+# would not be proof that nothing is there, and "fresh" is the claim that has
+# to be proven.
+fm_control_session_ref_resumes() {  # <reference>
+  case "${1-}" in
+    '') return 1 ;;
+    /*)
+      fm_control_session_path_plain "$1" || return 0
+      [ -f "$1" ] && [ -s "$1" ]
+      ;;
+    *) return 0 ;;
+  esac
+}
+
+# fm_control_session_path_plain: an absolute path written the one way the
+# kernel and the runtime both read identically - no empty, `.`, or `..`
+# component and no trailing slash.
+fm_control_session_path_plain() {  # <path>
+  case "${1-}" in
+    /*) ;;
+    *) return 1 ;;
+  esac
+  case "$1" in
+    */|*//*|*/./*|*/../*|*/.|*/..) return 1 ;;
+  esac
+  return 0
+}
+
+# fm_control_fresh_session_check: whether the session <reference> a relaunch
+# would resume can be set aside, so that the same reference starts a new
+# conversation (the --fresh relaunch; docs/herdr-backend.md "Resumed or fresh").
+#   0  a session file is there and may be renamed aside
+#   3  nothing is there: the launch already starts an empty session on it
+#   1  refused, with the reason printed
+#
+# Setting a session aside renames a file this plane did not create, so it is
+# allowed for exactly one shape and nothing is guessed past it: an absolute,
+# plainly written path to a regular, non-symlink `.jsonl` file whose directory
+# is physically under <sessions-root>, the sessions directory of the Pi account
+# the replacement launches under. An id reference names no file at all, so no
+# file can be proven to hold that conversation. Nothing is moved for a path
+# with no file, which is why that case is answered before the containment
+# checks: there is nothing to get wrong.
+fm_control_fresh_session_check() {  # <reference> <sessions-root>
+  local ref=${1-} root=${2-} dir root_real dir_real
+  case "$ref" in
+    /*) ;;
+    *)
+      printf "its bound session is recorded by id ('%s'), not as a file path, so no file can be proven to hold that conversation" "$ref"
+      return 1
+      ;;
+  esac
+  if ! fm_control_session_path_plain "$ref"; then
+    printf "its bound session '%s' is not a plainly written absolute path" "$ref"
+    return 1
+  fi
+  if [ ! -e "$ref" ] && [ ! -L "$ref" ]; then
+    return 3
+  fi
+  if [ -L "$ref" ]; then
+    printf "its bound session '%s' is a symlink" "$ref"
+    return 1
+  fi
+  if [ ! -f "$ref" ]; then
+    printf "its bound session '%s' is not a regular file" "$ref"
+    return 1
+  fi
+  case "$ref" in
+    *.jsonl) ;;
+    *)
+      printf "its bound session '%s' is not a .jsonl session file" "$ref"
+      return 1
+      ;;
+  esac
+  dir=${ref%/*}
+  if [ -z "$root" ] || ! root_real=$(cd "$root" 2>/dev/null && pwd -P); then
+    printf "Pi's sessions root '%s' cannot be resolved, so its bound session '%s' cannot be placed under it" "$root" "$ref"
+    return 1
+  fi
+  if ! dir_real=$(cd "${dir:-/}" 2>/dev/null && pwd -P); then
+    printf "the directory of its bound session '%s' cannot be resolved" "$ref"
+    return 1
+  fi
+  case "$dir_real/" in
+    "${root_real%/}"/*) ;;
+    *)
+      printf "its bound session '%s' is not under Pi's sessions root '%s'" "$ref" "$root_real"
+      return 1
       ;;
   esac
   return 0
