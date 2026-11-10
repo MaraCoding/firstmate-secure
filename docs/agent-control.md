@@ -169,7 +169,7 @@ The command headers own the exact steps, and [`bin/fm-fleet-pause-lib.sh`](../bi
 | --- | --- |
 | [`bin/fm-fleet-pause.sh`](../bin/fm-fleet-pause.sh) `[--reason <text>]` | Writes the pause record first, saves the job queue's live jobs, pauses the queue (which cancels them), interrupts each mid-turn ship and scout, and marks each one waiting. It sends no message to any worker. |
 | [`bin/fm-fleet-resume.sh`](../bin/fm-fleet-resume.sh) `[--stagger-secs <n>] [--force]` | Starts the queue daemon when it is down, resumes the queue and confirms it from the snapshot the queue publishes, removes the pause record, then sends each marked worker one steer naming the jobs the pause cut and closes its mark. |
-| [`bin/fm-host-recover.sh`](../bin/fm-host-recover.sh) `[--force]` | Once per boot: starts the queue daemon, pauses the queue again while a pause record stands, and relaunches each worker whose endpoint is dead or holds an agent the fleet did not launch, with a note naming its lost jobs. |
+| [`bin/fm-host-recover.sh`](../bin/fm-host-recover.sh) `[--force] [--skip <task-id>]...` | Once per boot: starts the queue daemon, pauses the queue again while a pause record stands, and relaunches each worker whose endpoint is dead or holds an agent the fleet did not launch, with a note naming its lost jobs. |
 
 The pause record is the one-line `state/captain-pause.flag`.
 A home's own alarm guard or watchdog may read it, and they depend only on the file existing and on its age, which running the pause again refreshes.
@@ -185,8 +185,10 @@ After a host restart during a pause it refuses until the recovery has run for th
 An agent the fleet did not launch is what a terminal backend leaves when it restores panes after a restart and re-runs the bare harness: the endpoint still classifies as a live agent, but the process has none of the environment, flags, or working directory `bin/fm-spawn.sh` gave it.
 The recovery tells the two apart without a backend write: no agent process carries the task's launch marker (`FM_TASK_ID`, or `FM_TASK_INBOX` for a second mate), or that process sits outside the recorded worktree, or the task's busy generation is older than the boot.
 An endpoint it cannot classify is reported and left alone, and a dead worker whose newest status is `done` or `failed` is not relaunched.
+A worker that was stopped on purpose before the restart reads as dead like every other, so look at a `--dry-run` first and pass `--skip <task-id>` for each one that should stay stopped.
 
 None of the three reaches into a second mate's home: a second mate is neither paused nor resumed from its parent, and its crew is recovered in its own home.
+To act on a second mate's crew, run the same command with `FM_HOME` set to that home; a fleet-wide stop that must reach every worker is one pause per home, and the shared job queue is paused by whichever runs first.
 The recovery relaunches a local second mate that is dead or not fleet-launched, except while the fleet is paused, and prints the command for a remote one.
 
 ## Fail-closed boundaries

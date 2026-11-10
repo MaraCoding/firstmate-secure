@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # fm-host-recover.sh - bring this home's fleet back after a host restart, with no model call.
-# Usage: fm-host-recover.sh [--dry-run] [--force]
+# Usage: fm-host-recover.sh [--dry-run] [--force] [--skip <task-id>]...
 #
 # Run it once after the host restarts. It exits at once, printing nothing,
 # when the boot id is the one it recorded last time; --force runs it anyway.
@@ -45,6 +45,11 @@
 # --dry-run prints every command that would run and every note that would be
 # given, and changes nothing.
 #
+# --skip <task-id> (repeatable) leaves that direct report alone and says so in
+# the table. A worker that was stopped on purpose before the restart reads as
+# dead like every other, and only the operator knows it should stay stopped: a
+# dry run shows what would be relaunched, and --skip is how to keep one out.
+#
 # bin/fm-fleet-pause-lib.sh owns the records, the queue snapshot trust rule,
 # and the classification. This command never recovers a second mate's crew
 # from here and never steers anyone: it relaunches, and a relaunched worker
@@ -62,15 +67,24 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
 usage() {
-  echo "usage: fm-host-recover.sh [--dry-run] [--force]" >&2
+  echo "usage: fm-host-recover.sh [--dry-run] [--force] [--skip <task-id>]..." >&2
 }
 
 DRY_RUN=0
 FORCE=0
+# The task ids --skip named, each wrapped in spaces so a whole id is matched.
+SKIP=' '
+SKIP_SEEN=' '
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run) DRY_RUN=1; shift ;;
     --force) FORCE=1; shift ;;
+    --skip)
+      { [ $# -ge 2 ] && [ -n "$2" ]; } || { usage; exit 2; }
+      SKIP="$SKIP$2 "
+      shift 2
+      ;;
+    --skip=?*) SKIP="$SKIP${1#--skip=} "; shift ;;
     -h|--help)
       sed -n '2,/^[^#]/{/^#/s/^# \{0,1\}//p}' "${BASH_SOURCE[0]}"
       exit 0
@@ -353,6 +367,16 @@ fm_fleet_proc_scan
 [ "$FM_FLEET_PROC_SCAN" = ok ] || fm_fleet_note "note: this host has no /proc, so no agent's environment or working directory can be read; classification rests on the endpoint state and the busy generation alone"
 while IFS=$(printf '\t') read -r kind id <&3; do
   [ -n "$id" ] || continue
+  case "$SKIP" in
+    *" $id "*)
+      # Left exactly as it is: not classified, not relaunched, and counted so
+      # the summary still accounts for every direct report.
+      SKIP_SEEN="$SKIP_SEEN$id "
+      N_LEFT=$((N_LEFT + 1))
+      add_row "$id" "$kind" - none "skipped (--skip)"
+      continue
+      ;;
+  esac
   if [ "$kind" = secondmate ]; then
     recover_mate "$id"
   else
@@ -361,6 +385,14 @@ while IFS=$(printf '\t') read -r kind id <&3; do
 done 3<<EOF
 $(fm_fleet_tasks)
 EOF
+# A --skip that names nobody is most likely a typo for a worker that was then
+# classified like the rest, so say it rather than let it pass unnoticed.
+for skipped in $SKIP; do
+  case "$SKIP_SEEN" in
+    *" $skipped "*) ;;
+    *) fm_fleet_note "note: --skip $skipped names no direct report of this home; nothing was skipped for it" ;;
+  esac
+done
 
 # --- 5. the table, then the boot id --------------------------------------------
 

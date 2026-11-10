@@ -24,6 +24,8 @@
 #      relaunched, a healthy one is not, and a remote one is only reported with
 #      the command that relaunches it.
 #   7. A queue the daemon itself restored as paused is left that way.
+#   8. --skip leaves the named worker exactly as it is and says so; a --skip
+#      that names nobody is reported.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -336,9 +338,27 @@ test_usage_and_no_boot_id() {
   pass "fm-host-recover: usage errors exit 2, and a host with no boot id is refused"
 }
 
+test_skip_leaves_a_worker_alone() {
+  local dir out rc=0
+  dir=$(make_restarted_pair skip)
+  out=$(fp_run "$dir" fm-host-recover.sh --skip t-dead --skip=t-typo) || rc=$?
+  expect_code 0 "$rc" "a recovery that skips one worker should succeed: $out"
+  assert_equals "t-gone relaunch" "$(cat "$dir/log/control")" "the skipped worker must not be relaunched, and the other still is"
+  assert_absent "$dir/log/note-t-dead" "no note is written for a skipped worker"
+  assert_contains "$out" "$(row t-dead ship - none 'skipped (--skip)')" "the table should say the worker was skipped"
+  assert_contains "$out" "summary: 0 healthy, 1 relaunched, 1 left alone, 0 not determined; 0 step(s) failed" "a skipped worker counts as left alone"
+  assert_contains "$out" "note: --skip t-typo names no direct report of this home" "a --skip that names nobody should be reported"
+  assert_equals "boot_id=boot-B" "$(sed -n 1p "$dir/home/state/fleet-pause/host-boot")" "a skip is not a failure, so the boot is recorded"
+  rc=0
+  out=$(fp_run "$dir" fm-host-recover.sh --skip) || rc=$?
+  expect_code 2 "$rc" "--skip without a task id is a usage error"
+  pass "fm-host-recover: --skip leaves the named worker alone, and a --skip that names nobody is reported"
+}
+
 test_same_boot_is_quiet
 test_dry_run_changes_nothing
 test_relaunches_only_dead_or_not_fleet_launched
+test_skip_leaves_a_worker_alone
 test_paused_fleet_stays_paused
 test_failed_relaunch_is_retried
 test_second_mates
