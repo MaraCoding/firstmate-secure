@@ -747,7 +747,7 @@ tests/fm-commandcode-harness.test.sh 8182
 tests/fm-commandcode-signals-live-e2e.test.sh 49
 tests/fm-composer-codex-idle-live-e2e.test.sh 77
 tests/fm-composer-matrix-live-e2e.test.sh 51
-tests/fm-context-check.test.sh 4700
+tests/fm-context-check.test.sh 12900
 tests/fm-contributions.test.sh 140911
 tests/fm-control-relaunch.test.sh 114115
 tests/fm-control.test.sh 72794
@@ -813,6 +813,7 @@ tests/fm-pi-branch-extension.test.sh 77218
 tests/fm-pi-branch-live-e2e.test.sh 48
 tests/fm-pi-branch-responsiveness-live-e2e.test.sh 12834
 tests/fm-pi-codex-native.test.sh 75
+tests/fm-pi-context-compact.test.sh 18700
 tests/fm-pi-primary-live-e2e.test.sh 72
 tests/fm-pi-seeded-home-trust-live-e2e.test.sh 45
 tests/fm-pi-watch-extension.test.sh 56515
