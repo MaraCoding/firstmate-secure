@@ -8,7 +8,10 @@
 # adapter isolation (one adapter's writer or Grok's regex can never classify
 # another adapter); endpoint death is the only process-level override and
 # yields dead, never busy; converted adapters never classify from rendered
-# footer text. All hermetic over temp dirs; no real agent session is invoked.
+# footer text. It also pins the host-boot binding arm writes beside each gen and
+# the restored-incarnation check that reads it, exact by boot id and
+# conservative by clock for a gen armed before the binding existed.
+# All hermetic over temp dirs; no real agent session is invoked.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -613,8 +616,260 @@ test_turn_ended_notification_is_generation_bound() {
   pass "the turn-ended notification rides the apply generation check"
 }
 
+# --- incarnation and host boot -------------------------------------------------
+#
+# A gen says which incarnation a record belongs to, not that its agent is still
+# the process sitting in the endpoint. After a host restart every agent the
+# fleet launched is gone, while a terminal backend that restores its layout can
+# put a new agent into the endpoint. arm therefore binds each gen to the host
+# boot it was minted in, and fm_busy_incarnation_restored reads that binding.
+# Fake /proc and /run roots make every case deterministic on any platform.
+
+BOOT_T0=1794293642   # the fixture boot's first second, for the legacy cases
+
+boot_world() {  # <name> [boot-id] -> sets BW_STATE BW_PROC BW_RUN
+  BW_STATE=$(new_state_dir "$1")
+  BW_PROC="$TMP_ROOT/$1/proc"
+  BW_RUN="$TMP_ROOT/$1/run"
+  mkdir -p "$BW_PROC/sys/kernel/random" "$BW_RUN"
+  [ -z "${2:-}" ] || printf '%s\n' "$2" > "$BW_PROC/sys/kernel/random/boot_id"
+}
+
+# boot_world_clocks <btime> [run-entry-mtime...]: the two boot-time witnesses
+# the legacy fallback reads - /proc/stat's btime, and one /run entry per stamp.
+boot_world_clocks() {
+  local btime=$1 n=0 stamp
+  shift
+  printf 'cpu  1 2 3 4\nintr 9 8 7\nctxt 5\nbtime %s\nprocesses 6\n' "$btime" > "$BW_PROC/stat"
+  rm -rf "$BW_RUN"
+  mkdir -p "$BW_RUN"
+  for stamp in "$@"; do
+    n=$((n + 1))
+    : > "$BW_RUN/entry$n"
+    fm_touch_epoch "$stamp" "$BW_RUN/entry$n"
+  done
+}
+
+boot_meta() {  # [meta-line...] -> the task record for t1
+  fm_write_meta "$BW_STATE/t1.meta" "window=s:w" "kind=ship" "harness=claude" "$@"
+}
+
+# The reader, in a subshell so the real fm-backend.sh (it supplies fm_meta_get)
+# never joins the backend stubs the cases above define. Prints
+# "<yes|no>:<evidence>"; an argument first rewrites the running boot's id.
+boot_restored() {  # [host-boot-id]
+  (
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-backend.sh"
+    [ -z "${1:-}" ] || printf '%s\n' "$1" > "$BW_PROC/sys/kernel/random/boot_id"
+    export FM_PROC_ROOT_OVERRIDE="$BW_PROC" FM_RUN_ROOT_OVERRIDE="$BW_RUN"
+    if evidence=$(fm_busy_incarnation_restored "$BW_STATE/t1.meta" t1 "$BW_STATE"); then
+      printf 'yes:%s' "$evidence"
+    else
+      printf 'no:%s' "$evidence"
+    fi
+  )
+}
+
+# legacy_gen <mint-epoch>: a task armed before the boot binding existed - a gen
+# with that mint second, no binding, and a record that names it.
+legacy_gen() {
+  rm -f "$BW_STATE"/t1.busy-*
+  printf 'g%s.4242.7\n' "$1" > "$BW_STATE/t1.busy-gen"
+  boot_meta "busy_gen=g$1.4242.7"
+}
+
+test_arm_binds_the_gen_to_the_host_boot() {
+  local gen replacement
+  boot_world boot-arm boot-a
+  gen=$(FM_PROC_ROOT_OVERRIDE="$BW_PROC" "$EV" arm "$BW_STATE" t1) || fail "arm failed"
+  [ "$(cat "$BW_STATE/t1.busy-boot" 2>/dev/null)" = "v1 gen=$gen boot=boot-a" ] \
+    || fail "arm did not bind the gen to the host boot, got '$(cat "$BW_STATE/t1.busy-boot" 2>/dev/null)'"
+  printf 'boot-b\n' > "$BW_PROC/sys/kernel/random/boot_id"
+  replacement=$(FM_PROC_ROOT_OVERRIDE="$BW_PROC" "$EV" arm "$BW_STATE" t1) || fail "re-arm failed"
+  [ "$(cat "$BW_STATE/t1.busy-boot")" = "v1 gen=$replacement boot=boot-b" ] \
+    || fail "re-arm kept the previous incarnation's boot binding"
+  "$EV" retire "$BW_STATE" t1 --gen "$replacement" || fail "retire failed"
+  [ ! -e "$BW_STATE/t1.busy-boot" ] || fail "retire left the boot binding behind"
+  pass "arm binds each gen to the kernel boot id, re-arm replaces the binding, and retire removes it"
+}
+
+test_arm_without_a_boot_id_writes_no_binding() {
+  local gen
+  boot_world boot-none boot-a
+  FM_PROC_ROOT_OVERRIDE="$BW_PROC" "$EV" arm "$BW_STATE" t1 >/dev/null || fail "arm failed"
+  [ -f "$BW_STATE/t1.busy-boot" ] || fail "fixture: the first arm should have bound a boot"
+  rm -f "$BW_PROC/sys/kernel/random/boot_id"
+  gen=$(FM_PROC_ROOT_OVERRIDE="$BW_PROC" "$EV" arm "$BW_STATE" t1) \
+    || fail "arm must not depend on a kernel boot id"
+  [ ! -e "$BW_STATE/t1.busy-boot" ] \
+    || fail "an arm with no boot id left the previous incarnation's binding in place"
+  [ "$(cat "$BW_STATE/t1.busy-gen")" = "$gen" ] || fail "arm did not mint the gen"
+  [ "$(fm_busy_classify tmux w1 claude t1 "$BW_STATE")" = "busy fm-spawn" ] \
+    || fail "arm without a boot id did not seed the record"
+  "$EV" retire "$BW_STATE" t1 --gen "$gen" || fail "retire without a binding failed"
+  pass "a platform with no kernel boot id arms exactly as before and leaves no stale boot binding"
+}
+
+test_incarnation_restored_when_the_boot_id_changed() {
+  local gen far
+  boot_world boot-changed boot-a
+  gen=$(FM_PROC_ROOT_OVERRIDE="$BW_PROC" "$EV" arm "$BW_STATE" t1)
+  boot_meta "busy_gen=$gen"
+  [ "$(boot_restored boot-a)" = "no:" ] \
+    || fail "an incarnation armed in the running boot must not read restored, got '$(boot_restored boot-a)'"
+  [ "$(boot_restored boot-b)" = "yes:boot-id" ] \
+    || fail "an incarnation armed in an earlier boot must read restored by boot id, got '$(boot_restored boot-b)'"
+  [ "$(FM_BUSY_BOOT_CHECK=off boot_restored boot-b)" = "no:" ] \
+    || fail "FM_BUSY_BOOT_CHECK=off must switch the check off"
+  # The binding is exact, so no clock can overrule it: with both boot clocks far
+  # in the future the legacy comparison would call this fresh gen ancient.
+  far=$(( $(date +%s) + 100000000 ))
+  boot_world_clocks "$far" "$far"
+  [ "$(boot_restored boot-a)" = "no:" ] \
+    || fail "a gen bound to the running boot must not fall back to comparing clocks"
+  pass "the boot binding alone decides: the running boot is not restored, another boot is, whatever the clocks say"
+}
+
+test_incarnation_check_is_silent_without_a_bound_record() {
+  local gen
+  boot_world boot-silent boot-a
+  gen=$(FM_PROC_ROOT_OVERRIDE="$BW_PROC" "$EV" arm "$BW_STATE" t1)
+
+  boot_meta
+  [ "$(boot_restored boot-b)" = "no:" ] \
+    || fail "a record that names no busy gen must not be judged by a gen file it does not claim"
+  boot_meta "busy_gen=g1.2.3"
+  [ "$(boot_restored boot-b)" = "no:" ] \
+    || fail "a record naming another gen must not be judged by the armed one"
+  boot_meta "busy_gen=$gen" "remote_host=buildbox"
+  [ "$(boot_restored boot-b)" = "no:" ] \
+    || fail "a remote task's boot is another host's and must be skipped"
+  boot_meta "busy_gen=$gen"
+  rm -f "$BW_PROC/sys/kernel/random/boot_id"
+  [ "$(boot_restored)" = "no:" ] \
+    || fail "a bound incarnation with no readable host boot id must be 'cannot tell'"
+  rm -f "$BW_STATE/t1.meta"
+  [ "$(boot_restored boot-b)" = "no:" ] || fail "a missing record must be 'cannot tell'"
+  boot_meta "busy_gen=$gen"
+  [ "$(boot_restored boot-b)" = "yes:boot-id" ] || fail "fixture: the bound record should read restored again"
+  "$EV" retire "$BW_STATE" t1 --gen "$gen" || fail "retire failed"
+  [ "$(boot_restored boot-b)" = "no:" ] || fail "a retired incarnation has nothing to judge"
+  pass "the incarnation check answers 'cannot tell' for an unbound, foreign, remote, unreadable, or retired incarnation"
+}
+
+# The fallback for an incarnation armed before the boot binding existed: the
+# gen's own mint second against this boot. /proc/stat's btime is derived from
+# two clocks and drifts late (20 minutes after 9 hours on a WSL2 host), so on its
+# own it would call a task armed early in THIS boot restored; the oldest mtime
+# in /run is stored at boot and does not move. The gen must predate both.
+test_legacy_incarnation_needs_both_boot_clocks() {
+  local drift=1229
+  boot_world boot-legacy boot-b
+  # This boot began at BOOT_T0; btime has since drifted `drift` seconds late.
+  boot_world_clocks $((BOOT_T0 + drift)) "$BOOT_T0" $((BOOT_T0 + 3)) $((BOOT_T0 + 4000))
+
+  legacy_gen $((BOOT_T0 - 3600))
+  [ "$(boot_restored)" = "yes:gen-epoch" ] \
+    || fail "a gen minted an hour before this boot must read restored, got '$(boot_restored)'"
+  legacy_gen $((BOOT_T0 + 600))
+  [ "$(boot_restored)" = "no:" ] \
+    || fail "a gen minted ten minutes INTO this boot read restored because btime had drifted past it"
+  legacy_gen $((BOOT_T0 + 30000))
+  [ "$(boot_restored)" = "no:" ] || fail "a gen minted hours into this boot must not read restored"
+  legacy_gen $((BOOT_T0 - 60))
+  [ "$(boot_restored)" = "no:" ] || fail "a gen inside the margin before boot must not read restored"
+  legacy_gen $((BOOT_T0 - 121))
+  [ "$(boot_restored)" = "yes:gen-epoch" ] || fail "a gen just past the margin must read restored"
+  pass "the legacy fallback flags a gen older than this boot and never one minted in it, even under btime drift"
+}
+
+test_legacy_incarnation_is_silent_without_a_trustworthy_boot_time() {
+  local gen
+  boot_world boot-legacy-silent boot-b
+  boot_world_clocks $((BOOT_T0 + 1229)) "$BOOT_T0"
+  legacy_gen $((BOOT_T0 - 3600))
+  [ "$(boot_restored)" = "yes:gen-epoch" ] || fail "fixture: this gen should read restored"
+
+  # /run entries rewritten long after boot are not a boot stamp.
+  boot_world_clocks $((BOOT_T0 + 1229)) $((BOOT_T0 + 1229 + 301)) $((BOOT_T0 + 9000))
+  [ "$(boot_restored)" = "no:" ] || fail "a /run stamp later than btime plus its slack must not be believed"
+  # A /run that was not emptied at boot can only make the check quieter.
+  boot_world_clocks $((BOOT_T0 + 1229)) $((BOOT_T0 - 90000))
+  [ "$(boot_restored)" = "no:" ] || fail "a /run older than the gen must not flag it"
+  boot_world_clocks $((BOOT_T0 + 1229))
+  [ "$(boot_restored)" = "no:" ] || fail "an empty /run gives no boot stamp"
+  rm -rf "$BW_RUN"
+  [ "$(boot_restored)" = "no:" ] || fail "a missing /run gives no boot stamp"
+  boot_world_clocks $((BOOT_T0 + 1229)) "$BOOT_T0"
+  printf 'cpu  1 2 3 4\n' > "$BW_PROC/stat"
+  [ "$(boot_restored)" = "no:" ] || fail "a /proc/stat with no btime must be 'cannot tell'"
+  rm -f "$BW_PROC/stat"
+  [ "$(boot_restored)" = "no:" ] || fail "a platform with no /proc/stat must be 'cannot tell'"
+
+  # A gen that carries no wall-clock second (hand-written fixtures do) is never judged.
+  boot_world_clocks $((BOOT_T0 + 1229)) "$BOOT_T0"
+  for gen in g1.1.1 g-superseded.1.1 g0794293642.1.1 "g$((BOOT_T0 - 3600))"; do
+    rm -f "$BW_STATE"/t1.busy-*
+    printf '%s\n' "$gen" > "$BW_STATE/t1.busy-gen"
+    boot_meta "busy_gen=$gen"
+    [ "$(boot_restored)" = "no:" ] || fail "gen '$gen' has no plausible mint second and must not be judged"
+  done
+  pass "the legacy fallback stays silent when either boot clock is missing or late, or the gen has no mint second"
+}
+
+test_legacy_fallback_is_only_for_an_unbound_gen() {
+  boot_world boot-legacy-bound boot-b
+  boot_world_clocks $((BOOT_T0 + 1229)) "$BOOT_T0"
+  legacy_gen $((BOOT_T0 - 3600))
+  # A binding left by another incarnation, or one that cannot be parsed, is not this gen's.
+  printf 'v1 gen=gOTHER.1.1 boot=boot-b\n' > "$BW_STATE/t1.busy-boot"
+  [ "$(boot_restored)" = "yes:gen-epoch" ] || fail "another gen's binding must not vouch for this one"
+  printf 'garbage\n' > "$BW_STATE/t1.busy-boot"
+  [ "$(boot_restored)" = "yes:gen-epoch" ] || fail "a malformed binding must not vouch for the gen"
+  printf 'v1 gen=g%s.4242.7 boot=boot-b\nsecond line\n' "$((BOOT_T0 - 3600))" > "$BW_STATE/t1.busy-boot"
+  [ "$(boot_restored)" = "yes:gen-epoch" ] || fail "a multi-line binding must not vouch for the gen"
+  # Its own binding to the running boot settles it, whatever its epoch says.
+  printf 'v1 gen=g%s.4242.7 boot=boot-b\n' "$((BOOT_T0 - 3600))" > "$BW_STATE/t1.busy-boot"
+  [ "$(boot_restored)" = "no:" ] || fail "a gen bound to the running boot must not be judged by its epoch"
+  pass "a gen's own boot binding outranks the legacy clock comparison, and no other binding stands in for it"
+}
+
+# The check runs inside sourcing callers (the crew-state reader, the
+# session-start digest), so it must be safe under set -eu and leave their shell
+# as it found it.
+test_incarnation_check_leaves_the_caller_shell_intact() {
+  local out
+  boot_world boot-shell boot-b
+  boot_world_clocks $((BOOT_T0 + 1229)) "$BOOT_T0"
+  legacy_gen $((BOOT_T0 - 3600))
+  out=$(FM_PROC_ROOT_OVERRIDE="$BW_PROC" FM_RUN_ROOT_OVERRIDE="$BW_RUN" bash -euc '
+    . "$1/bin/fm-backend.sh"
+    . "$1/bin/fm-busy-lib.sh"
+    state=$2
+    set -f
+    set -- keepme second
+    verdict=$(fm_busy_incarnation_restored "$state/t1.meta" t1 "$state") || verdict=none
+    absent=$(fm_busy_incarnation_restored "$state/nope.meta" nope "$state") || absent=none
+    printf "%s|%s|%s|%s|%s" "$verdict" "$absent" "$1" "$#" "$-"
+  ' _ "$ROOT" "$BW_STATE" 2>&1)
+  case "$out" in
+    gen-epoch\|none\|keepme\|2\|*f*) : ;;
+    *) fail "the incarnation check disturbed a set -eu caller: $out" ;;
+  esac
+  pass "the incarnation check is safe under set -eu and never clobbers the caller's parameters or glob setting"
+}
+
 test_progress_is_generation_bound_and_not_semantic_state
 test_turn_ended_notification_is_generation_bound
+test_arm_binds_the_gen_to_the_host_boot
+test_arm_without_a_boot_id_writes_no_binding
+test_incarnation_restored_when_the_boot_id_changed
+test_incarnation_check_is_silent_without_a_bound_record
+test_legacy_incarnation_needs_both_boot_clocks
+test_legacy_incarnation_is_silent_without_a_trustworthy_boot_time
+test_legacy_fallback_is_only_for_an_unbound_gen
+test_incarnation_check_leaves_the_caller_shell_intact
 
 test_arm_seeds_busy_spawn
 test_apply_advances_seq_and_source

@@ -5,7 +5,7 @@
 # Usage: fm-control.sh <task-id> interrupt
 #        fm-control.sh <task-id> exit
 #        fm-control.sh <task-id> relaunch [--harness <name>] [--model <name>]
-#                                         [--effort <level>]
+#                                         [--effort <level>] [--fresh]
 #                                         (--note <text> | --note-file <path>)
 #
 # Why this exists, and how it differs from fm-send.sh. bin/fm-send.sh is the
@@ -94,6 +94,25 @@
 #              the prior durable record in place and reports the concrete
 #              state; it never leaves a half-transitioned task claiming to be
 #              running.
+#              The result line ends with session=resumed or session=fresh:
+#              whether the replacement was started on a session that holds the
+#              previous conversation, as the launch owner recorded it. Only a
+#              Pi relaunch on Herdr ever resumes one - the pane's bound session
+#              is handed back so Herdr keeps tracking the pane
+#              (docs/herdr-backend.md "Resumed or fresh") - so a relaunch meant
+#              to shed a worker's context is checked from that field, never
+#              assumed.
+#              --fresh asks for a new conversation there. After the old agent
+#              has stopped, the bound session file is renamed to
+#              <path>.prior-<epoch> and the launch reuses its path, where Pi
+#              starts an empty session; the result line names the renamed file
+#              as session_prior=. It refuses, before anything is touched,
+#              unless that file is a regular, non-symlink .jsonl file under the
+#              launching account's Pi sessions root, and it changes nothing
+#              wherever the relaunch starts a fresh session anyway. A launch
+#              that fails before the new record is published renames the file
+#              back, and a --fresh relaunch whose recorded outcome is not
+#              session=fresh exits nonzero after printing its result line.
 #
 # Teardown and discard are NOT verbs here and never will be. `exit` stops an
 # agent and preserves everything else; removing a worktree, killing an
@@ -256,6 +275,7 @@ MODEL_SET=0
 EFFORT_SET=0
 NOTE=
 NOTE_SET=0
+FRESH=0
 control_want_value=
 for control_arg in "$@"; do
   if [ -n "$control_want_value" ]; then
@@ -283,6 +303,7 @@ for control_arg in "$@"; do
     --model=*) NEW_MODEL=${control_arg#--model=}; MODEL_SET=1 ;;
     --effort) control_want_value=effort ;;
     --effort=*) NEW_EFFORT=${control_arg#--effort=}; EFFORT_SET=1 ;;
+    --fresh) FRESH=1 ;;
     --note) control_want_value=note ;;
     --note=*) NOTE=${control_arg#--note=}; NOTE_SET=1 ;;
     --note-file) control_want_value=note_file ;;
@@ -301,7 +322,8 @@ fi
 
 if [ "$VERB" != relaunch ]; then
   [ "$HARNESS_SET" = 0 ] && [ "$MODEL_SET" = 0 ] && [ "$EFFORT_SET" = 0 ] && [ "$NOTE_SET" = 0 ] \
-    || die "--harness, --model, --effort, and --note apply to 'relaunch' only"
+    && [ "$FRESH" = 0 ] \
+    || die "--harness, --model, --effort, --fresh, and --note apply to 'relaunch' only"
 fi
 [ "$HARNESS_SET" = 0 ] || [ -n "$NEW_HARNESS" ] || die "--harness requires a non-empty value"
 [ "$MODEL_SET" = 0 ] || [ -n "$NEW_MODEL" ] || die "--model requires a non-empty value"
@@ -818,6 +840,13 @@ PRIOR_EFFORT=
 TARGET_HARNESS=$HARNESS
 TARGET_MODEL=
 TARGET_EFFORT=
+# --fresh (the header owns the contract): the Pi account root the replacement
+# launches under when this home pins one, the bound session file to set aside,
+# where it went once it has been, and why it could not be when it could not.
+RELAUNCH_PI_ROOT=
+RELAUNCH_FRESH_REF=
+RELAUNCH_FRESH_PRIOR=
+FRESH_REFUSAL=
 
 journal_write() {  # <phase> [extra-line]...
   local phase=$1
@@ -849,7 +878,7 @@ journal_write() {  # <phase> [extra-line]...
 }
 
 relaunch_rollback() {
-  local state
+  local state fresh_note='' fresh_line=''
   [ "$RELAUNCH_ACTIVE" = 1 ] || return 0
   [ "$RELAUNCH_PHASE" != complete ] || return 0
   RELAUNCH_ACTIVE=0
@@ -892,9 +921,18 @@ relaunch_rollback() {
       esac
       ;;
     exited|launching)
+      # A --fresh relaunch renamed the bound session aside before the launch.
+      # Once the launch owner has published the new record, a replacement may
+      # already be starting on the emptied path, where it creates its session
+      # file exclusively, so the renamed file stays where it is and is named.
+      # Only a launch that never got that far gets it back (below).
+      if [ -n "$RELAUNCH_FRESH_PRIOR" ]; then
+        fresh_note="; its previous conversation was set aside at $RELAUNCH_FRESH_PRIOR"
+        fresh_line="session_prior=$RELAUNCH_FRESH_PRIOR"
+      fi
       if [ "$RELAUNCH_AGENT_CONFIRMED" = 1 ]; then
-        journal_write "failed:$RELAUNCH_PHASE" "rollback=none-new-agent-confirmed" || true
-        echo "error: $ID's replacement is running on $TARGET_HARNESS, but transaction completion could not be persisted; its published record was retained for reconciliation" >&2
+        journal_write "failed:$RELAUNCH_PHASE" "rollback=none-new-agent-confirmed" ${fresh_line:+"$fresh_line"} || true
+        echo "error: $ID's replacement is running on $TARGET_HARNESS, but transaction completion could not be persisted; its published record was retained for reconciliation$fresh_note" >&2
       elif [ "$RELAUNCH_META_PUBLISHED" = 1 ] \
          || { [ -n "$RELAUNCH_TX" ] \
               && [ "$(fm_meta_get "$META" control_relaunch_tx)" = "$RELAUNCH_TX" ]; }; then
@@ -903,11 +941,15 @@ relaunch_rollback() {
         # harness with no agent confirmed, which is exactly what recovery
         # reconciles. Rewriting it back to the old harness would be a second,
         # worse inaccuracy.
-        journal_write "failed:$RELAUNCH_PHASE" "rollback=none-new-record-kept" || true
-        echo "error: $ID was relaunched on $TARGET_HARNESS but no running agent could be confirmed; its work is preserved at $WT" >&2
+        journal_write "failed:$RELAUNCH_PHASE" "rollback=none-new-record-kept" ${fresh_line:+"$fresh_line"} || true
+        echo "error: $ID was relaunched on $TARGET_HARNESS but no running agent could be confirmed; its work is preserved at $WT$fresh_note" >&2
       else
-        journal_write "failed:$RELAUNCH_PHASE" "rollback=prior-record-kept" || true
-        echo "error: $ID's agent was stopped but the replacement did not launch; no agent is running, and its work plus the recorded progress note are preserved at $WT" >&2
+        if [ -n "$RELAUNCH_FRESH_PRIOR" ] && fresh_session_restore; then
+          fresh_note="; its previous conversation was put back at $RELAUNCH_FRESH_REF"
+          fresh_line="session_restored=$RELAUNCH_FRESH_REF"
+        fi
+        journal_write "failed:$RELAUNCH_PHASE" "rollback=prior-record-kept" ${fresh_line:+"$fresh_line"} || true
+        echo "error: $ID's agent was stopped but the replacement did not launch; no agent is running, and its work plus the recorded progress note are preserved at $WT$fresh_note" >&2
       fi
       ;;
   esac
@@ -1001,11 +1043,23 @@ resolve_relaunch_profile() {
   # The launch owner applies this home's worker account pin too, but only after
   # the old agent has been stopped, so a pin that no longer resolves or is
   # signed out must refuse here, while nothing has changed yet.
-  local account_model=$TARGET_MODEL account_mate=
+  local account_model=$TARGET_MODEL account_mate= account_selection
   [ "$account_model" != default ] || account_model=
   [ "$KIND" != secondmate ] || account_mate=$ID
-  fm_worker_account_select "$TARGET_HARNESS" "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" \
-    "$account_model" "$TARGET_HARNESS" "" "$account_mate" >/dev/null || return 1
+  account_selection=$(fm_worker_account_select "$TARGET_HARNESS" "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" \
+    "$account_model" "$TARGET_HARNESS" "" "$account_mate") || return 1
+  # A pinned Pi replacement runs under the pinned root (the launch owner
+  # exports it as PI_CODING_AGENT_DIR), so that is where its sessions live and
+  # where --fresh may look for the bound one.
+  RELAUNCH_PI_ROOT=
+  case "$TARGET_HARNESS" in
+    pi|pi-signed)
+      if [ -n "$account_selection" ]; then
+        RELAUNCH_PI_ROOT=${account_selection#*$'\t'}
+        RELAUNCH_PI_ROOT=${RELAUNCH_PI_ROOT%%$'\t'*}
+      fi
+      ;;
+  esac
   # Likewise polytoken's launch profile and wiring refusals
   # (bin/fm-polytoken-lib.sh owns them). The launch owner retires the prior
   # incarnation's own generated hook layer, so only one it did not generate
@@ -1139,8 +1193,78 @@ record_note() {
   esac
 }
 
+# --- a fresh conversation on the bound session (--fresh) ----------------------
+#
+# A Pi relaunch on Herdr hands the pane's bound session back so Herdr keeps
+# tracking the pane, which also hands the replacement the whole previous
+# conversation. --fresh keeps the binding and drops the conversation: with the
+# old agent stopped, the bound session FILE is renamed aside and the launch
+# reuses its path, where Pi starts an empty session (docs/herdr-backend.md
+# "Resumed or fresh"). bin/fm-control-lib.sh owns which session a relaunch
+# resumes and whether its file may be moved; this is only the transaction
+# around that one rename.
+
+# relaunch_pi_sessions_root: where the replacement's Pi keeps its sessions -
+# under the pinned account root when this home pins Pi workers, else under the
+# root this environment selects, else Pi's default.
+relaunch_pi_sessions_root() {
+  printf '%s/sessions' "${RELAUNCH_PI_ROOT:-${PI_CODING_AGENT_DIR:-${HOME:-}/.pi/agent}}"
+}
+
+# fresh_session_plan: what --fresh has to do for this relaunch, from the same
+# read the launch owner makes. Leaves RELAUNCH_FRESH_REF naming the session
+# file to set aside, or empty when the replacement starts a new conversation
+# anyway (no bound session for this harness and endpoint, or a bound path with
+# no file behind it). Returns 1 with FRESH_REFUSAL set when a session is bound
+# but cannot be proven to be a movable Pi session file.
+fresh_session_plan() {
+  local pair ref rc=0
+  RELAUNCH_FRESH_REF=
+  FRESH_REFUSAL=
+  pair=$(fm_control_relaunch_resume_ref "$TARGET_HARNESS" "$BACKEND" "$T") || pair=
+  [ -n "$pair" ] || return 0
+  ref=${pair#*$'\t'}
+  FRESH_REFUSAL=$(fm_control_fresh_session_check "$ref" "$(relaunch_pi_sessions_root)") || rc=$?
+  case "$rc" in
+    0) RELAUNCH_FRESH_REF=$ref ;;
+    3) ;;
+    *) return 1 ;;
+  esac
+  return 0
+}
+
+# fresh_session_set_aside: the one mutation --fresh makes, after the old agent
+# has stopped and before the launch. The plan is read again first, because the
+# agent that just exited may have moved to another session since the pre-stop
+# check; a refusal here leaves everything where it is and fails the relaunch as
+# any other post-stop failure does.
+fresh_session_set_aside() {
+  local prior
+  fresh_session_plan \
+    || die "--fresh could not set task $ID's bound conversation aside after its agent stopped: $FRESH_REFUSAL"
+  [ -n "$RELAUNCH_FRESH_REF" ] || return 0
+  prior="$RELAUNCH_FRESH_REF.prior-$(date +%s)"
+  [ ! -e "$prior" ] && [ ! -L "$prior" ] \
+    || die "--fresh will not overwrite $prior, which already exists; task $ID's bound conversation was left where it is"
+  mv -- "$RELAUNCH_FRESH_REF" "$prior" \
+    || die "--fresh could not rename task $ID's bound session $RELAUNCH_FRESH_REF aside; it was left where it is"
+  RELAUNCH_FRESH_PRIOR=$prior
+}
+
+# fresh_session_restore: undo that rename. Called only where the launch owner
+# provably never delivered a launch (it failed before publishing the new
+# record): a Pi started on the emptied path creates its session file there
+# exclusively on its first answer, so putting the old file back under a
+# replacement that did start would make that write fail.
+fresh_session_restore() {
+  [ -n "$RELAUNCH_FRESH_PRIOR" ] && [ -n "$RELAUNCH_FRESH_REF" ] || return 1
+  [ ! -e "$RELAUNCH_FRESH_REF" ] && [ ! -L "$RELAUNCH_FRESH_REF" ] || return 1
+  mv -- "$RELAUNCH_FRESH_PRIOR" "$RELAUNCH_FRESH_REF" 2>/dev/null || return 1
+  RELAUNCH_FRESH_PRIOR=
+}
+
 do_relaunch() {
-  local exit_result state note_line
+  local exit_result state note_line session fresh_line=
   local -a spawn_args
 
   require_state_verified_backend relaunch
@@ -1164,6 +1288,13 @@ do_relaunch() {
       ;;
   esac
 
+  # --fresh is decided here, on the pre-stop side of the transaction, so a
+  # bound session that cannot be proven movable refuses while nothing has
+  # changed. The rename itself waits until the old agent has stopped.
+  if [ "$FRESH" = 1 ] && ! fresh_session_plan; then
+    die "--fresh cannot give task $ID a new conversation: $FRESH_REFUSAL. Nothing was changed; relaunch without --fresh to continue the bound conversation"
+  fi
+
   if [ -n "$NOTE" ]; then
     note_line="note_file=$NOTE_FILE"
   else
@@ -1181,10 +1312,17 @@ do_relaunch() {
   exit_result=$(do_exit)
   journal_write exited "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
 
+  # The old agent is stopped and nothing has been launched: the one moment the
+  # bound session file can be renamed without a writer on either side of it.
+  if [ "$FRESH" = 1 ]; then
+    fresh_session_set_aside
+    [ -z "$RELAUNCH_FRESH_PRIOR" ] || fresh_line="session_prior=$RELAUNCH_FRESH_PRIOR"
+  fi
+
   # The launch owner (fm-spawn --relaunch) clears the previous incarnation's
   # per-task harness wiring before arming the new one, so nothing to do here.
   RELAUNCH_TX="${BASHPID:-$$}.$(date -u +%Y%m%dT%H%M%SZ).$RANDOM"
-  journal_write launching "${CHECKPOINT_LINES[@]}" "$note_line" "relaunch_tx=$RELAUNCH_TX"
+  journal_write launching "${CHECKPOINT_LINES[@]}" "$note_line" "relaunch_tx=$RELAUNCH_TX" ${fresh_line:+"$fresh_line"}
   spawn_args=("$ID" --relaunch --harness "$TARGET_HARNESS")
   [ "$TARGET_MODEL" = default ] || spawn_args+=(--model "$TARGET_MODEL")
   [ "$TARGET_EFFORT" = default ] || spawn_args+=(--effort "$TARGET_EFFORT")
@@ -1219,9 +1357,28 @@ do_relaunch() {
   }
   RELAUNCH_AGENT_CONFIRMED=1
 
-  journal_write complete "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
+  # Which conversation the replacement runs on is the launch owner's fact, not
+  # this script's guess: it recorded what it actually put on the launch line.
+  # A record without the field cannot be called either way.
+  session=$(fm_meta_get "$META" relaunch_session)
+  case "$session" in
+    resumed|fresh) ;;
+    *) session=unknown ;;
+  esac
+
+  journal_write complete "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result" "session=$session" ${fresh_line:+"$fresh_line"}
   RELAUNCH_ACTIVE=0
-  echo "relaunched $ID harness=$TARGET_HARNESS from=$PRIOR_RECORDED_HARNESS model=$TARGET_MODEL effort=$TARGET_EFFORT backend=$BACKEND endpoint=$T worktree=$WT"
+  echo "relaunched $ID harness=$TARGET_HARNESS from=$PRIOR_RECORDED_HARNESS model=$TARGET_MODEL effort=$TARGET_EFFORT backend=$BACKEND endpoint=$T worktree=$WT session=$session${RELAUNCH_FRESH_PRIOR:+ session_prior=$RELAUNCH_FRESH_PRIOR}"
+  # The relaunch itself happened and is reported above; what did not happen, or
+  # cannot be shown to have happened, is the new conversation that was asked
+  # for, and that must not read as success.
+  if [ "$FRESH" = 1 ]; then
+    case "$session" in
+      fresh) ;;
+      resumed) die "task $ID was relaunched, but --fresh did not take: the launch owner started its replacement on a session that already holds a conversation (session=resumed)" ;;
+      *) die "task $ID was relaunched, but --fresh could not be confirmed: its record does not say which session its replacement was started on (session=unknown)" ;;
+    esac
+  fi
 }
 
 # --- verbs ------------------------------------------------------------------

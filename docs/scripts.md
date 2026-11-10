@@ -137,8 +137,8 @@ The shared no-mistakes gate lifecycle boundary is summarized in [architecture.md
 | `fm-fleet-resume.sh`     | End a fleet pause: confirm the job queue admits again, remove the pause record, and send each marked worker one steer naming the jobs the pause cut |
 | `fm-host-recover.sh`     | After a host restart, start the job queue and relaunch each worker whose endpoint is dead or holds an agent the fleet did not launch |
 | `fm-fleet-pause-lib.sh`  | Shared owner of the fleet pause record, the worker wait mark, the queue-snapshot trust rule, and the fleet-launch evidence behind the three commands above |
-| `fm-busy-lib.sh`         | Single owner of the semantic busy-state contract: verdicts, source attribution, and per-harness sources |
-| `fm-busy-event.sh`       | The only writer of a task's semantic busy-state record and native-harness progress marker; arms an incarnation and applies lifecycle events |
+| `fm-busy-lib.sh`         | Single owner of the semantic busy-state contract: verdicts, source attribution, per-harness sources, and the check for an incarnation armed in an earlier host boot |
+| `fm-busy-event.sh`       | The only writer of a task's semantic busy-state record and native-harness progress marker; arms an incarnation, binds it to the host boot, and applies lifecycle events |
 | `fm-tmux-lib.sh`         | Shared tmux pane primitives for composer capture, verified submit, and the submit-time busy check |
 | `fm-peek.sh`             | Print a bounded tail of a crewmate endpoint                                          |
 | `fm-check-register.sh`   | Bind an intentional custom watcher check to its current bytes                       |

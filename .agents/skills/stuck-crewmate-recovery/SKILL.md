@@ -1,8 +1,8 @@
 ---
 name: stuck-crewmate-recovery
 description: >-
-  Load when session start reports a direct report's endpoint dead or windowless, after a stale wake, looping pane, repeated confusion, answered-by-brief question,
-  unresponsive crewmate, or failed steer, and when a live crewmate reports its no-mistakes pipeline dead, unreachable, or timed out.
+  Load when session start reports a direct report's endpoint dead, windowless, or restored after a host restart, after a stale wake, looping pane, repeated confusion,
+  answered-by-brief question, unresponsive crewmate, or failed steer, and when a live crewmate reports its no-mistakes pipeline dead, unreachable, or timed out.
 user-invocable: false
 metadata:
   internal: true
@@ -45,6 +45,22 @@ Do not work around either refusal by respawning - it means a live agent may stil
 That reclaim is the owning home's operation only, and a secondmate is the one exception: recover it through `bin/fm-spawn.sh <id> --secondmate` as above.
 Do not use a fresh generic spawn while the recorded worktree is unaccounted for, because allocating another worktree can split one task across two copies.
 If the worktree or ownership cannot be reconciled safely, leave all state intact and report the task failed or blocked with the conflicting evidence.
+
+## An endpoint restored after a host restart
+
+The digest's `endpoint: alive-restored` line, and `bin/fm-crew-state.sh` answering `state: unknown · source: restored-after-boot`, both mean the same thing: the host restarted, and the terminal backend put an agent back into the endpoint that Firstmate did not launch ([`docs/herdr-backend.md`](../../../docs/herdr-backend.md#restored-agents-after-a-host-restart)).
+That agent has no task id, no steering inbox, no busy wiring, and none of its model or permission flags, and it may be sitting outside the task's worktree, so it is not a worker to steer, however alive the pane looks and whatever its last status line says.
+
+A task whose status log already ends in `done:` or `failed:` finished before the restart: handle that outcome as usual instead of relaunching it, and the restored agent goes when the task is cleaned up.
+Otherwise relaunch it with `FM_HOME=<this-firstmate-home> bin/fm-control.sh <task-id> relaunch --note '<what was in flight>'`; a secondmate takes the same command without a note.
+The relaunch stops the restored agent, returns the pane to the recorded worktree, and starts a replacement with the full launch line.
+Whatever the previous worker was waiting on may not have survived the host either, so check it first and say in the note what has to be redone rather than letting the replacement wait for it.
+
+## Shedding a worker's context
+
+A relaunch is how a worker past the crew context limit gets a new conversation, and its result line says whether it did: `session=fresh`, or `session=resumed` when the replacement was started on the previous conversation and kept all of it.
+A Pi worker on Herdr resumes by default, because Herdr tracks the pane through that session ([`docs/herdr-backend.md`](../../../docs/herdr-backend.md#resumed-or-fresh)); pass `--fresh` to set the old conversation aside and start a new one on the same session path.
+Never report a context reset from the relaunch alone - read `session=`.
 
 ## A live crewmate claiming the pipeline is dead
 

@@ -54,7 +54,11 @@
 #                       state/.afk daemon flag), and a cheap per-task
 #                       endpoint-liveness read, each bounded and crash-
 #                       isolated so one task's read can never abort the
-#                       digest: read-only, always runs. The per-task reads
+#                       digest: read-only, always runs. A live endpoint whose
+#                       armed incarnation belongs to an earlier host boot is
+#                       printed alive-restored with its repair, never as
+#                       plainly alive (bin/fm-busy-lib.sh's
+#                       fm_busy_incarnation_restored). The per-task reads
 #                       run serially, so with a wedged backend the stage's
 #                       ceiling is tasks x the per-read bound
 #                       (FM_SESSION_START_ENDPOINT_TIMEOUT, default 10s) and
@@ -365,6 +369,8 @@ PRIMARY_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
 
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-busy-lib.sh
+. "$SCRIPT_DIR/fm-busy-lib.sh"
 # shellcheck source=bin/fm-tasks-axi-lib.sh
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 # shellcheck source=bin/fm-public-followup-lib.sh
@@ -938,7 +944,17 @@ for meta in "$STATE"/*.meta; do
     # the bound firing and >=128 is a signal death. Every other nonzero status
     # is the probe's own verdict that the endpoint is gone.
     if [ "$endpoint_rc" -eq 0 ]; then
-      printf 'endpoint: alive (backend=%s window=%s)\n' "$backend" "$window"
+      # Alive is a presence check, not proof the fleet's own agent is there: an
+      # endpoint a terminal backend restored after a host restart holds an
+      # agent the fleet never launched. fm_busy_incarnation_restored owns the
+      # evidence and stays silent whenever it cannot tell, so say it here,
+      # where recovery starts, with the one repair.
+      if fm_busy_incarnation_restored "$meta" "$id" "$STATE" >/dev/null; then
+        printf 'endpoint: alive-restored (backend=%s window=%s - armed before this host boot, so whatever runs here was not launched by the fleet; repair: bin/fm-control.sh %s relaunch)\n' \
+          "$backend" "$window" "$id"
+      else
+        printf 'endpoint: alive (backend=%s window=%s)\n' "$backend" "$window"
+      fi
     elif [ "$endpoint_rc" -eq 124 ] || [ "$endpoint_rc" -ge 128 ]; then
       printf 'endpoint: error (backend=%s window=%s - the endpoint read died or hit its %ss bound; the digest continued past it)\n' \
         "$backend" "$window" "$ENDPOINT_TIMEOUT"

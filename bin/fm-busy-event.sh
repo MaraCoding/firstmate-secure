@@ -12,6 +12,12 @@
 #       minted gen on stdout so the caller can embed it into adapter wiring.
 #       Arming again replaces the previous incarnation: late events carrying
 #       the old gen are rejected as stale from then on.
+#       Arming also binds the gen to the host boot it was minted in
+#       (state/<id>.busy-boot; bin/fm-busy-lib.sh "Boot sidecar" owns the
+#       format and its reader). That binding is best effort by design: a
+#       platform with no kernel boot id, or a sidecar that cannot be written,
+#       leaves no binding rather than failing the arm, and the reader then
+#       falls back to the gen's own mint second.
 #
 #   apply <state-dir> <id> <busy|idle|unknown> (--gen G | --current-gen)
 #         --source S --event E [--turn-ended]
@@ -34,7 +40,7 @@
 #       incarnation can never refresh its replacement's progress.
 #
 #   retire <state-dir> <id> (--gen G | --current-gen)
-#       Remove one incarnation's sidecar and record while holding the same
+#       Remove one incarnation's sidecars and record while holding the same
 #       writer lock used by arm and apply. An exact gen prevents teardown for
 #       an old task from retiring a newly armed incarnation. A missing sidecar
 #       is already retired, so any orphan record is removed idempotently.
@@ -108,6 +114,7 @@ fi
 
 REC=$(fm_busy_record_path "$STATE" "$ID")
 GEN_FILE=$(fm_busy_gen_path "$STATE" "$ID")
+BOOT_FILE=$(fm_busy_boot_path "$STATE" "$ID")
 LOCK="$REC.lock"
 
 # Portable mtime in epoch seconds. macOS (BSD) stat uses `-f <fmt>`; Linux (GNU)
@@ -158,6 +165,22 @@ write_record() {  # <gen> <seq>
   mv -f "$tmp" "$REC"
 }
 
+# Bind the gen just minted to the host boot it was minted in. Best effort (the
+# header says why), and it never leaves a binding it did not write: whatever
+# goes wrong, the previous incarnation's sidecar is removed rather than kept.
+write_boot_binding() {  # <gen>
+  local boot tmp
+  if boot=$(fm_busy_host_boot_id); then
+    tmp="$BOOT_FILE.tmp.$$"
+    if printf '%s gen=%s boot=%s\n' "$FM_BUSY_LIB_VERSION" "$1" "$boot" > "$tmp" 2>/dev/null \
+       && mv -f "$tmp" "$BOOT_FILE" 2>/dev/null; then
+      return 0
+    fi
+    rm -f "$tmp" 2>/dev/null || true
+  fi
+  rm -f "$BOOT_FILE" 2>/dev/null || true
+}
+
 old_umask=$(umask)
 umask 077
 
@@ -168,6 +191,7 @@ if [ "$CMD" = arm ]; then
     printf '%s\n' "$GEN" > "$GEN_FILE.tmp.$$" && mv -f "$GEN_FILE.tmp.$$" "$GEN_FILE" \
       && write_record "$GEN" 1 && rm -f "$STATE/$ID.progress"
   } || { lock_release; umask "$old_umask"; echo "error: arm failed for $ID" >&2; exit 1; }
+  write_boot_binding "$GEN"
   lock_release
   umask "$old_umask"
   printf '%s\n' "$GEN"
@@ -189,7 +213,7 @@ fi
 lock_acquire || { umask "$old_umask"; exit 1; }
 CURRENT=$(fm_busy_current_gen "$STATE" "$ID") || {
   if [ "$CMD" = retire ] && [ ! -e "$GEN_FILE" ] && [ ! -L "$GEN_FILE" ]; then
-    rm -f "$REC" "$STATE/$ID.progress" || {
+    rm -f "$REC" "$BOOT_FILE" "$STATE/$ID.progress" || {
       lock_release
       umask "$old_umask"
       echo "error: busy-state retirement failed for $ID" >&2
@@ -214,7 +238,7 @@ if [ "$GEN" != "$CURRENT" ]; then
   exit 1
 fi
 if [ "$CMD" = retire ]; then
-  rm -f "$GEN_FILE" "$REC" "$STATE/$ID.progress" || {
+  rm -f "$GEN_FILE" "$REC" "$BOOT_FILE" "$STATE/$ID.progress" || {
     lock_release
     umask "$old_umask"
     echo "error: busy-state retirement failed for $ID" >&2

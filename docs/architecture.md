@@ -271,6 +271,8 @@ Endpoint death is the only process-level override and yields dead; child process
 `state/<id>.turn-ended` files remain wake notifications, not current state.
 
 Each record is bound to an incarnation token minted when the task's wiring is armed, so an event from a superseded incarnation is rejected rather than applied, and a record left behind by one classifies unknown.
+Arming also records the host boot that incarnation belongs to (`state/<id>.busy-boot`), because the token alone cannot say its agent is still the process in the endpoint: after a host restart a terminal backend can restore an endpoint with a new agent the fleet never launched.
+`fm_busy_incarnation_restored` reads that binding for `bin/fm-crew-state.sh`, which then answers `unknown · restored-after-boot` instead of trusting the dead incarnation's record or status log, and for the session-start digest's `endpoint: alive-restored` line; [Restored agents after a host restart](herdr-backend.md#restored-agents-after-a-host-restart) owns the case and its limits.
 Three rendered-text checks deliberately remain outside this contract because they answer delivery questions: submit acknowledgement and the away-mode supervisor-pane busy guard consume the shared delivery-footer matcher owned by `bin/fm-composer-lib.sh`, while `bin/fm-pending-reply-lib.sh` owns the secondmate delivery-confirmation observation.
 All are harness-scoped rather than a global pattern union, and none is a recorded worker state source.
 

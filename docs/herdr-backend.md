@@ -792,6 +792,7 @@ No Herdr-specific copy of that protocol exists.
 Stopping and restarting a named Herdr server preserves workspace, tab, pane, and label ids.
 The underlying harness processes and live agent registrations do not survive.
 A restored same-labeled tab with a missing pane or no registered agent is a husk.
+A Herdr that restarts agents on restore fills those panes again with agents Firstmate did not launch; [Restored agents after a host restart](#restored-agents-after-a-host-restart) covers that case.
 
 Create replaces only a confidently dead or no-agent husk, creates the replacement before closing the old tab, and refuses live or unknown states.
 This prevents closing the workspace's last tab before a replacement exists.
@@ -851,6 +852,38 @@ The session-start sweep and the watcher's dedicated secondmate liveness tick use
 Idle secondmates remain exempt from stale-pane escalation.
 [Secondmate endpoint recovery](architecture.md) owns the shared supervision mechanism.
 
+### Restored agents after a host restart
+
+Herdr 0.9.5 defaults to `[session] resume_agents_on_restore = true`.
+On server start it reopens each saved pane in the directory it saved for it and re-runs the agent it last saw there as a bare `pi --session <path>` or `claude --resume <id>` (observed 2026-11-09 after a WSL restart, on 27 Pi panes and 1 Claude pane).
+The pane, its label, and its registration read live again, and the agent-liveness probe above answers `alive`, but the agent is not the one Firstmate launched.
+It has none of the launch line: no `FM_TASK_ID`, no `FM_TASK_INBOX`, no per-task busy extension or hooks, and no model, effort, or permission flags.
+It starts in whatever directory Herdr saved for the pane, which is not always the task's worktree.
+Nothing it does reaches the task's busy record, so that record keeps the dead incarnation's last state.
+
+Firstmate binds each armed busy generation to the host boot it was armed in, and reads that binding where a live endpoint would otherwise be taken at its word:
+
+| Where | What it reports |
+| --- | --- |
+| `bin/fm-busy-event.sh arm` | Writes `state/<id>.busy-boot`, the kernel boot id, beside the generation it mints. |
+| `bin/fm-crew-state.sh` | `state: unknown · source: restored-after-boot`, in place of the status log or the busy record. |
+| The session-start digest | `endpoint: alive-restored`, in place of `endpoint: alive`. |
+
+Both readers name the repair, the ordinary `bin/fm-control.sh <id> relaunch`.
+It stops whatever is in the pane, returns the pane's shell to the recorded worktree, and launches a replacement with the full launch line and a generation armed in this boot.
+A task whose status log already ended in `done:` or `failed:` before the restart needs its usual completion, not a replacement; with no pipeline run attributed, `bin/fm-crew-state.sh` still answers `restored-after-boot` for it, as it already answers `unknown` for a dead endpoint.
+
+`fm_busy_incarnation_restored` in `bin/fm-busy-lib.sh` owns the evidence and every case in which it stays silent.
+A generation armed before the sidecar existed is judged by the epoch inside it, and only when that epoch predates both `/proc/stat`'s `btime` and the oldest entry in `/run`: `btime` alone drifts on WSL2 (20 minutes late after 9 hours of uptime, measured 2026-11-10), which would call a task armed early in the current boot restored.
+
+Limits:
+
+- The check is keyed on the host boot, so a Herdr server restarted within one boot restores agents the same way and is not detected.
+- It runs only after an endpoint has read alive: in the no-run fallback of `bin/fm-crew-state.sh` and on the digest's endpoint line. An attributed no-mistakes run still answers first, and the busy classifier itself is unchanged.
+- A platform with no kernel boot id (macOS) writes no sidecar and skips the check.
+- A generation with no sidecar is judged by wall clocks, which errs toward silence. It reads restored for a live task in one case: the wall clock was set back after boot, by more than two minutes plus the time since boot, before that task was armed. Relaunching the task gives it a sidecar.
+- `FM_BUSY_BOOT_CHECK=off` in a reader's environment switches the check off for that reader ([configuration](configuration.md)).
+
 ## Agent status authority and relaunch
 
 A pane has ONE status authority, and for Pi with the integration installed that authority is the lifecycle hooks - Herdr then skips screen detection for the pane, which is the `full_lifecycle_hook_authority` reason `herdr agent explain` prints for it.
@@ -859,7 +892,7 @@ That authority is bound to a session identity, and in the crew shape the registr
 An agent started FRESH in such a pane reports a new session and Herdr ignores its reports, so the pane stays frozen at whatever the previous agent last reported - a crewmate running its pipeline reads `idle` until its task ends, and nothing from outside repairs it (measured 2026-09-21 on Herdr 0.9.1 against a real Pi; `pane report-agent-session` and `pane report-agent` for `herdr:pi` are accepted without being applied unless the reporter is the registered pane agent, and `pane release-agent` on the stale record changes nothing).
 A fresh spawn never meets this: it gets a new pane with nothing bound.
 
-So a **relaunch** preserves the binding instead of fighting it: before the Pi-family launch line is composed, `bin/fm-spawn.sh` reads the pane's recorded session reference through `fm_backend_herdr_pane_agent_session_ref` and passes it back as Pi's own `--session <path-or-id>` (`relaunch_resume_args`; `bin/fm-control-lib.sh`'s `fm_control_relaunch_resume_flag` owns which adapters and which registration labels qualify).
+So a **relaunch** preserves the binding instead of fighting it: before the Pi-family launch line is composed, `bin/fm-spawn.sh` reads the pane's recorded session reference through `fm_backend_herdr_pane_agent_session_ref` and passes it back as Pi's own `--session <path-or-id>` (`relaunch_resume_args`, over `bin/fm-control-lib.sh`'s `fm_control_relaunch_resume_ref`; that file's `fm_control_relaunch_resume_flag` owns which adapters and which registration labels qualify).
 The replacement therefore starts on the exact identity the authority is bound to, and its `working`/`idle`/`blocked` reports land again.
 The reference is the endpoint's own record, never a guess about which session is recent, and only a `pi` label may supply it: a registration belonging to another adapter is ignored, as is an unreadable, missing, or malformed one, in which case the relaunch is the ordinary fresh session it always was.
 A relaunch that changes harness AWAY from Pi is not repaired by this and keeps the pre-existing behavior; only the adapter the authority belongs to can resume its session.
@@ -867,6 +900,27 @@ A relaunch that changes harness AWAY from Pi is not repaired by this and keeps t
 The session file may not exist any more: Pi creates it at exactly that path, so the identity survives either way.
 The read grants no send, close, or lifecycle authority of its own - it is a read of Herdr's record.
 The portable halves are pinned by `tests/fm-backend-herdr.test.sh` (the read, against a canned CLI) and `tests/fm-control.test.sh` (the per-adapter rule), and `tests/fm-control-herdr-smoke.test.sh` exercises the relaunch path against the real binary; the versioned live measurement, including the reproduction and the resume that lifts it, is [`verification/runtime-backends.md`](verification/runtime-backends.md) "Pane status authority across a relaunch".
+
+### Resumed or fresh
+
+Keeping the identity also keeps the conversation, so a relaunch meant to shed a worker's context can leave all of it in place.
+`bin/fm-control.sh <id> relaunch` therefore ends its result line with `session=resumed` or `session=fresh`, read back from the `relaunch_session=` the launch owner records in `state/<id>.meta`.
+`resumed` means the replacement was started on a session that holds a conversation: a path with a non-empty file, or a reference recorded by id.
+`fresh` covers everything else, including a bound path whose file is gone.
+
+`--fresh` sheds the conversation and keeps the binding.
+Pi given `--session <path>` for a path with no file starts a new, empty session and writes it at exactly that path on its first answer, and Herdr's Pi integration reports a session by its file path alone, so the replacement reports the identity the pane is already bound to.
+After the old agent has stopped, `--fresh` renames the bound session file to `<path>.prior-<epoch>`, and the launch passes the same `--session <path>`.
+The result line names the renamed file as `session_prior=`.
+The conversation is kept rather than deleted; Pi lists only `*.jsonl` files as sessions, so the renamed file leaves its session list until it is renamed back.
+
+`--fresh` refuses before the old agent is touched unless the bound reference is an absolute path to a regular, non-symlink `*.jsonl` file under the launching account's Pi sessions root.
+A reference recorded by id is refused, because no file can be proven to hold that conversation.
+Where a relaunch starts a fresh session anyway - any other backend, any other harness, a pane with no Pi registration, a bound path with no file - `--fresh` changes nothing and the result still reads `session=fresh`.
+If the launch owner fails before it publishes the replacement's record, the file is renamed back; once a replacement may have started on the emptied path it stays where it is and the error names it.
+
+The Pi half is read from Pi 0.85.1's own source and confirmed by running its session manager; the Herdr half follows from the integration's report and has not been measured against a live server ([`verification/runtime-backends.md`](verification/runtime-backends.md) "A new conversation on the bound session path").
+`tests/fm-control-relaunch.test.sh` pins the control-plane half against a canned CLI: the recorded outcome, the rename, each refusal, and the rename back.
 
 ## Push events and polling fallback
 
