@@ -227,7 +227,7 @@ Drive a worker's lifecycle through `bin/fm-control.sh <task-id> interrupt|exit|r
 Pause and resume the whole fleet only with `bin/fm-fleet-pause.sh` and `bin/fm-fleet-resume.sh` (`--dry-run` shows the steps), never step by step by hand; while `state/captain-pause.flag` exists the fleet is paused, so dispatch nothing, steer no one, and leave the job queue paused until the captain ends the pause.
 A secondmate's routed reply returns through status or a document pointer, not by firstmate peeking into its chat.
 For the parent-owned correlation, recovery, and escalation contract on marked secondmate requests, see `bin/fm-pending-reply-lib.sh`.
-Before steering a ship or scout, and whenever its direction changes, run `bin/fm-context-check.sh <task>`; past the crew context limit (`config/crew-context-limit`, default 250000 tokens) end the session and respawn it with a handoff brief instead of steering, and `fm-send` refuses such a steer unless given `--allow-large-context`.
+Before steering a ship or scout, and whenever its direction changes, run `bin/fm-context-check.sh <task>`; past the crew context limit (`config/crew-context-limit`, default 250000 tokens) end the session and respawn it with a handoff brief instead of steering, and `fm-send` refuses such a steer unless given `--allow-large-context`, each use of which is recorded in `state/context-bypass.log`.
 When the captain adds or changes an ask mid-task, append the captain's words without added speaker labels or direct address to that brief's `## Captain's intent` and relay those words to the worker; Firstmate build constraints stay in `## Firstmate spec` or the steer.
 Supervise all live work under section 8.
 
@@ -237,6 +237,7 @@ The selected delivery path owns its own rigor.
 When no-mistakes is selected, no-mistakes alone owns review, fixes, tests, documentation, push, PR, and CI; otherwise follow the faster path without adding an independent reviewer.
 Never hold work outside no-mistakes for a manual clean verdict, stack serial manual reviews, or infer authority for one from security, architecture, or risk alone.
 A separate review or audit is allowed only when the captain explicitly requests that deliverable or the authorized task is a knowledge-only review; one named question remains scoped to that question.
+When the captain has asked for independent reviews of finished work, take each candidate's review tier from `bin/fm-review-tier.sh` rather than from memory; `ship-landing` owns what each tier requires.
 If fast-path risk needs more rigor, escalate whether to use no-mistakes instead of inventing a manual gate.
 The path's worker, automated gates, and captain approval remain authoritative:
 

@@ -683,6 +683,16 @@ An explicit non-empty `NM_HOME` always wins and the resolver is not called.
 With the file absent, a first line that is not an absolute executable path, or a resolver that fails, times out, or prints anything else, every read uses the ambient home exactly as without the file.
 The file is a home-local site choice and is not inherited by secondmate homes; `bin/fm-nm-run-lib.sh` owns the exact resolution.
 
+## Landing proof (config/landing-proof)
+
+The optional local, gitignored `config/landing-proof` file names the validations a `local-only` project requires on the exact commit that lands.
+Each line is `<project> mode <warn|require>` or `<project> proof <name> <extended regular expression>`, where `<project>` is the basename of the project checkout and the expression must contain `@COMMIT@`, which stands for the full id of the commit being landed.
+A proof is a log file holding a line its expression matches: `bin/fm-merge-local.sh` asks `bin/fm-landing-proof.sh gate`, which accepts a recorded proof or finds one among the `*.log` files directly in `data/<task-id>/` and one directory below it.
+`warn` reports a missing proof and still merges, while `require` refuses the merge until the validation has run on that commit or `bin/fm-landing-proof.sh waive <task-id> --reason <text>` records why it does not apply.
+With the file absent, or for a project it does not name, landing is unchanged and nothing is recorded; a malformed rule refuses the merge rather than reading as nothing required.
+The script's header owns the rule grammar, the `state/<task-id>.landing-proof` record, and the `state/landing-proofs.log` history line.
+The file is a home-local site choice and is not inherited by secondmate homes.
+
 ## Lane capacity (config/lane-capacity)
 
 The optional local, gitignored `config/lane-capacity` file holds one non-negative integer: how many ship and scout lanes this home should run at once.
@@ -698,6 +708,26 @@ The optional local, gitignored `config/crew-context-limit` file holds one positi
 With the file absent the limit is 250000; `FM_CREW_CONTEXT_LIMIT` overrides the file for one run, and a malformed value is refused rather than guessed.
 `bin/fm-context-check.sh <task>` reports the session's last-turn input tokens for Pi and Claude workers against the limit, and `bin/fm-send.sh` refuses a text steer to a local ship or scout past it unless given `--allow-large-context`; unknown context never blocks.
 The script's header owns session resolution, the measure, and exit codes.
+Each use of `--allow-large-context` on such a steer is recorded: the context is still measured, and one line with the UTC time, task, measured context, limit, and `over=yes|no|unknown` is appended to the size-capped `state/context-bypass.log`, with a note on stderr when the task is over the limit.
+The record never refuses or fails the send, and its measure is time-bounded; `bin/fm-send.sh`'s header owns the format and the bound.
+
+The optional local, gitignored `config/crew-context-compact-at` file holds one positive integer: a token threshold past which a Pi or pi-signed ship or scout compacts its own session, for example `230000`.
+It is off by default: with the file absent, the per-task Pi extension `bin/fm-spawn.sh` writes is unchanged, byte for byte, and Pi compacts only near its model's own context window.
+With the file present, the extension asks Pi to compact once the session's context is past the threshold and Pi has settled idle, at most once every ten minutes; each compaction is summarization work billed to the worker's own model.
+It never compacts mid-run, because Pi's extension-triggered compaction aborts a run in flight and does not resume it, so a single long run can still grow past the threshold until it settles.
+Until the next model response after a compaction, `bin/fm-context-check.sh` reports the session as unknown rather than over, and Pi's terminal interface queues a steer typed while it compacts (read in Pi 0.85.1's source, not yet confirmed in a live pane).
+The threshold is baked in at launch, so a change reaches each worker at its next spawn or relaunch; `FM_CREW_CONTEXT_COMPACT_AT` overrides the file for one launch, which is how to try it on a single worker.
+A malformed value starts the worker without the bound and warns on the spawn's stderr instead of refusing the launch.
+The file is a home-local choice, does not cover secondmates, and is not inherited by secondmate homes; `grep compactAtTokens state/<id>.pi-ext.ts` shows whether a running worker carries the bound.
+
+## Review tiers (config/review-tiers)
+
+`bin/fm-review-tier.sh <repo-path> <base-ref> <head-ref>` decides from a diff alone which independent review a finished change needs: `cross-family` when a changed production path matches a cross-family rule, `standard` when one matches a standard rule or the change reaches the size threshold, and `none` otherwise.
+The tracked `config-defaults/review-tiers` holds the default rules: CI workflows, gate configuration, deploy and rollback tooling, container and service definitions, and migrations are cross-family; tests, documentation, generated files, and lock files are not production; and the threshold is 300 changed production lines.
+The optional local, gitignored `config/review-tiers` is read before those defaults, so a home names its own gate, queue, persistence, and shared-runtime paths there: its path rules are tried first, its threshold replaces the default one, and its `nonprod` and `prod` globs add to the defaults'.
+A rules file that cannot be read, or that holds a malformed line, stops the script with exit 1 instead of yielding `none`.
+The file is a home-local choice and is not inherited by secondmate homes.
+[`bin/fm-review-tier.sh`](../bin/fm-review-tier.sh)'s header owns the line format, the glob rules, what is counted, and the output, and the `ship-landing` skill owns what firstmate does with each tier.
 
 ## Fleet pause timers (config/fleet-pause-timers)
 

@@ -13,8 +13,16 @@
 # parent waiting on a reply to nothing.
 # A text steer to a local ship or scout whose live context is past the crew
 # context limit is refused before anything is recorded (bin/fm-context-check.sh
-# owns the measure and the knob); --allow-large-context or
-# FM_SEND_CONTEXT_CHECK=0 skips the check, and unknown context never blocks.
+# owns the measure and the knob), and unknown context never blocks.
+# --allow-large-context sends such a steer regardless, and each use on a steer
+# that gate covers is recorded: the context is still measured, within
+# FM_SEND_CONTEXT_CHECK_BUDGET seconds (default 5), and one line is appended to
+# the size-capped state/context-bypass.log -
+#   <UTC time> task=<id> context=<tokens|unknown> limit=<tokens|unknown> over=<yes|no|unknown>
+# - with a note on stderr when the task is over the limit. A failed or
+# timed-out measure records unknown; the record never fails, refuses, or
+# reorders the send. FM_SEND_CONTEXT_CHECK=0 skips the check, the measure, and
+# the record.
 # Special keys instead of text: fm-send.sh <target> --key Enter
 # Key support is backend-specific: tmux/herdr support Escape, Enter, and C-c;
 # Orca currently supports Enter and C-c only, and rejects Escape.
@@ -752,6 +760,74 @@ fm_send_feed_resolved_holds() { # <answer-text>
   fi
 }
 
+# Record one --allow-large-context bypass of the context handoff gate (header
+# contract). The flag still sends every steer; this only measures what was
+# bypassed and appends the header's one-line record, so the bypass can be
+# audited afterwards instead of leaving no trace. Best-effort throughout: the
+# measure is bounded, any failure or timeout reads unknown, and no outcome
+# here may fail, refuse, or reorder the send, so the caller ignores the status.
+# The log is capped the way the watcher's triage log is
+# (bin/fm-push-transition-lib.sh triage_log): past the byte cap, keep the
+# newest lines.
+fm_send_record_context_bypass() { # <task-id>
+  local id=$1 log="$STATE/context-bypass.log" budget line='' rc=0
+  local tokens=unknown limit=unknown over=unknown recorded=0 size='' tmp=''
+  budget=${FM_SEND_CONTEXT_CHECK_BUDGET:-5}
+  case "$budget" in '' | *[!0-9]* | 0*) budget=5 ;; esac
+  line=$(fm_run_timed "$budget" "$SCRIPT_DIR/fm-context-check.sh" "$id" 2>/dev/null </dev/null) || rc=$?
+  line=${line%%$'\n'*}
+  # Exit 0, 3, and 4 are fm-context-check's own verdicts (under, over,
+  # unknown); anything else is a usage error or the bound, and proves nothing.
+  case "$rc" in
+  0 | 3 | 4)
+    case "$line" in
+    "context: "[0-9]*)
+      tokens=${line#"context: "}
+      tokens=${tokens%%[!0-9]*}
+      ;;
+    esac
+    case "$line" in
+    *" limit: "[0-9]*)
+      limit=${line#*" limit: "}
+      limit=${limit%%[!0-9]*}
+      ;;
+    esac
+    if [ "$tokens" != unknown ] && [ "$limit" != unknown ]; then
+      case "$rc" in
+      0) over=no ;;
+      3) over=yes ;;
+      esac
+    fi
+    ;;
+  esac
+  id=${id//[[:space:]]/_}
+  if { printf '%s task=%s context=%s limit=%s over=%s\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$id" "$tokens" "$limit" "$over" >>"$log"; } 2>/dev/null; then
+    recorded=1
+    size=$(wc -c <"$log" 2>/dev/null | tr -d '[:space:]') || size=
+    case "$size" in
+    '' | *[!0-9]*) ;;
+    *)
+      if [ "$size" -ge 262144 ]; then
+        tmp="$log.tmp.$$"
+        if tail -n 2000 "$log" >"$tmp" 2>/dev/null; then
+          mv -f "$tmp" "$log" 2>/dev/null || true
+        fi
+        rm -f "$tmp" 2>/dev/null || true
+      fi
+      ;;
+    esac
+  fi
+  if [ "$over" = yes ]; then
+    if [ "$recorded" = 1 ]; then
+      echo "fm-send: note: $id is at $tokens context tokens, past the crew context limit of $limit; sending anyway because of --allow-large-context (bypass recorded in $log). A relaunch with a fresh session resets the context." >&2
+    else
+      echo "fm-send: note: $id is at $tokens context tokens, past the crew context limit of $limit; sending anyway because of --allow-large-context. A relaunch with a fresh session resets the context." >&2
+    fi
+  fi
+  return 0
+}
+
 # Resolve the target's harness from its meta (recorded by fm-spawn), used only to
 # scope the codex `$<skill>` popup-settle below. A task selector carries
 # meta; an explicit backend-target escape hatch has none, so its harness is
@@ -813,10 +889,18 @@ else
       context_rc=0
       context_line=$("$SCRIPT_DIR/fm-context-check.sh" "$(fm_send_id_from_meta "$TARGET_META")" 2>&1) || context_rc=$?
       if [ "$context_rc" = 3 ]; then
-        echo "error: steer not sent: $(fm_send_id_from_meta "$TARGET_META") is past the crew context limit ($context_line). End the session and respawn it with a handoff brief instead of steering (bin/fm-context-check.sh header); pass --allow-large-context only when this one steer must still land, such as answering an open decision before the handoff." >&2
+        echo "error: steer not sent: $(fm_send_id_from_meta "$TARGET_META") is past the crew context limit ($context_line). End the session and respawn it with a handoff brief instead of steering (bin/fm-context-check.sh header); pass --allow-large-context only when this one steer must still land, such as answering an open decision before the handoff. Each use of that flag is recorded in state/context-bypass.log." >&2
         exit 1
       fi
       ;;
+    esac
+  fi
+  # Bypass record (header): the flag sends regardless, on the same steers the
+  # gate above covers, and FM_SEND_CONTEXT_CHECK=0 still means no check at all.
+  if [ "$ALLOW_LARGE_CONTEXT" = 1 ] && [ "${FM_SEND_CONTEXT_CHECK:-1}" != 0 ] &&
+    [ -n "$TARGET_SELECTOR" ] && [ -n "$TARGET_META" ] && [ "$TARGET_BACKEND" != remote ]; then
+    case "$(fm_meta_get "$TARGET_META" kind)" in
+    ship | scout) fm_send_record_context_bypass "$(fm_send_id_from_meta "$TARGET_META")" || true ;;
     esac
   fi
   if [ "$TARGET_BACKEND" = remote ]; then
