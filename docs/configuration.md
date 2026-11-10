@@ -682,6 +682,16 @@ An explicit non-empty `NM_HOME` always wins and the resolver is not called.
 With the file absent, a first line that is not an absolute executable path, or a resolver that fails, times out, or prints anything else, every read uses the ambient home exactly as without the file.
 The file is a home-local site choice and is not inherited by secondmate homes; `bin/fm-nm-run-lib.sh` owns the exact resolution.
 
+## Landing proof (config/landing-proof)
+
+The optional local, gitignored `config/landing-proof` file names the validations a `local-only` project requires on the exact commit that lands.
+Each line is `<project> mode <warn|require>` or `<project> proof <name> <extended regular expression>`, where `<project>` is the basename of the project checkout and the expression must contain `@COMMIT@`, which stands for the full id of the commit being landed.
+A proof is a log file holding a line its expression matches: `bin/fm-merge-local.sh` asks `bin/fm-landing-proof.sh gate`, which accepts a recorded proof or finds one among the `*.log` files directly in `data/<task-id>/` and one directory below it.
+`warn` reports a missing proof and still merges, while `require` refuses the merge until the validation has run on that commit or `bin/fm-landing-proof.sh waive <task-id> --reason <text>` records why it does not apply.
+With the file absent, or for a project it does not name, landing is unchanged and nothing is recorded; a malformed rule refuses the merge rather than reading as nothing required.
+The script's header owns the rule grammar, the `state/<task-id>.landing-proof` record, and the `state/landing-proofs.log` history line.
+The file is a home-local site choice and is not inherited by secondmate homes.
+
 ## Lane capacity (config/lane-capacity)
 
 The optional local, gitignored `config/lane-capacity` file holds one non-negative integer: how many ship and scout lanes this home should run at once.
