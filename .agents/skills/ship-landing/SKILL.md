@@ -21,6 +21,14 @@ A captain instruction to merge is explicit authority; `yolo` is the only standin
 For any custom `state/<id>.check.sh` you write yourself, keep it an ordinary single-link mode-`0700` file, print one line only when firstmate should wake, print nothing otherwise, finish before `FM_CHECK_TIMEOUT`, then bind its current bytes with `bin/fm-check-register.sh <id>` before the watcher may execute it.
 Retire a custom check only through `bin/fm-check-unregister.sh <id>` (or `bin/fm-teardown.sh` for a spawned task); never hand-compose an `rm` with `$STATE`/`$ID`.
 
+When the captain's standing instruction calls for an independent review of finished work, take the review tier from `bin/fm-review-tier.sh <worktree> <base> <candidate>` on the frozen candidate, never from memory of the task's size or subject.
+`cross-family` means a reviewer from the other model family than the builder reads the candidate, and it does not land, deploy, or go live before that review reports.
+`standard` means one same-family reviewer reads it against the severity rubric, and `none` means no independent review.
+When no reviewer of the other family can launch, because a captain override or a launcher refusal is in force, do not hold the landing for a `cross-family` verdict: use a same-family reviewer with the rubric, keep `tier=cross-family` in the record, and tell the captain which candidates landed without their other-family review.
+The captain's own standing instruction still wins where it asks for more than the tier does, such as one review for every candidate of a named project.
+Build each review brief from the home's `data/review-brief-template.md` when it has one, and run the script again when the candidate changes, because a new commit can change the tier.
+The script's header owns the rules file and the output.
+
 A `local-only` landing goes through `bin/fm-merge-local.sh`, which consults `bin/fm-landing-proof.sh` when the home's `config/landing-proof` names the project: every validation that file lists must have passed on the exact commit being landed.
 A refusal there means the proof belongs to another commit or was never produced, so run the missing validation on that commit; record `bin/fm-landing-proof.sh waive <id> --reason <text>` only when the requirement does not apply to this change, and say why.
 

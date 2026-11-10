@@ -82,6 +82,7 @@ The shared no-mistakes gate lifecycle boundary is summarized in [architecture.md
 | `fm-merge-local.sh`      | Fast-forward a `local-only` project's local default branch after approval            |
 | `fm-landing-proof.sh`    | Record and check that a `local-only` landing's required validations passed on the exact commit, per the opt-in `config/landing-proof` rules |
 | `fm-review-diff.sh`      | Review a crewmate branch or resolved PR head against the authoritative base          |
+| `fm-review-tier.sh`      | Read-only: decide from a diff alone which independent review a finished change needs (see [configuration.md](configuration.md#review-tiers-configreview-tiers)) |
 | `fm-marker-lib.sh`       | Compatibility entry point for the from-firstmate carrier owned by `fm-operational-input.sh` |
 | `fm-task-inbox-lib.sh`   | Single owner of durable steering-inbox records, acknowledgement, doorbells, and the delivery-attempt ladder |
 | `fm-pending-reply-lib.sh` | Parent-owned secondmate pending-reply expectations, recovery, and keyed escalation lifecycle |

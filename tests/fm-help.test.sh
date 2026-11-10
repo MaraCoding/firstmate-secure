@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # tests/fm-help.test.sh - the generated fm-* cheat sheet.
 # Pins: the default view stays under 6000 characters, carries one line per
-# operator command (including fm-context-check and fm-report-outline), hides
-# internals that --all shows, and filters by pattern.
+# operator command (including fm-context-check, fm-report-outline, and
+# fm-review-tier), hides internals that --all shows, and filters by pattern.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -15,7 +15,7 @@ test_default_view_is_small_and_complete() {
   out=$("$HELP") || fail "fm-help should succeed"
   n=$(printf '%s\n' "$out" | wc -c | tr -d ' ')
   [ "$n" -lt 6000 ] || fail "the default cheat sheet should stay under 6000 chars, got $n"
-  for cmd in fm-spawn fm-send fm-control fm-crew-state fm-teardown fm-context-check fm-report-outline fm-dispatch-resolve fm-tasks-axi; do
+  for cmd in fm-spawn fm-send fm-control fm-crew-state fm-teardown fm-context-check fm-report-outline fm-review-tier fm-dispatch-resolve fm-tasks-axi; do
     printf '%s\n' "$out" | grep -q "^${cmd}[ ]" || fail "the cheat sheet should list $cmd"
   done
   assert_contains "$out" "fm-control <task-id> interrupt|exit|relaunch" "multi-form usage should collapse to verbs"

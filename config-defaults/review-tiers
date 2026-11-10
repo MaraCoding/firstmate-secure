@@ -1,0 +1,34 @@
+# Tracked defaults for bin/fm-review-tier.sh, whose header owns this format.
+# A home's config/review-tiers is read before this file, so name a project's
+# own gate, queue, persistence and shared-runtime paths there rather than here
+# (docs/configuration.md "Review tiers").
+
+threshold=300
+
+# Not production: these lines never count and no path rule sees them.
+nonprod=*.md *.mdx *.rst docs/ doc/
+nonprod=tests/ test/ __tests__/ testdata/ fixtures/ test_* *_test.* *.test.* *.snap
+nonprod=*.lock package-lock.json pnpm-lock.yaml npm-shrinkwrap.json go.sum
+nonprod=*.min.js *.min.css *.pb.go *_pb2.py *.generated.* generated/ vendor/ third_party/ node_modules/
+
+# Gate and validation machinery: what decides whether a change may land.
+.github/workflows/       cross-family  CI workflows decide what may land or ship
+.gitlab-ci.yml           cross-family  the CI pipeline decides what may land or ship
+Jenkinsfile              cross-family  the CI pipeline decides what may land or ship
+.no-mistakes.yaml        cross-family  gate configuration
+.pre-commit-config.yaml  cross-family  commit-gate configuration
+.githooks/               cross-family  git hooks gate every commit
+.husky/                  cross-family  git hooks gate every commit
+
+# Deploy and release machinery: what puts a change live and takes it back.
+deploy*                  cross-family  deploy tooling
+rollback*                cross-family  rollback tooling
+Dockerfile*              cross-family  the image a deploy runs
+docker-compose*          cross-family  the services a deploy starts
+*.service                cross-family  a service unit: how the process starts, stops and restarts
+
+# Persistence and migration: what rewrites stored data.
+migrations/              cross-family  migrations rewrite stored data
+*.sql                    cross-family  schema or data statements
+
+# Queue control and shared runtime have no generic path: a home names its own.
