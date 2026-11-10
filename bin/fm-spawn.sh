@@ -6389,6 +6389,15 @@ fi
 if [ "$LAVISH_AXI_HOST_CONFIG_PRESENT" = 1 ]; then
   LAUNCH="export LAVISH_AXI_HOST=$(shell_quote "$LAVISH_AXI_HOST"); $LAUNCH"
 fi
+# Every launch gets its steering inbox directory before the agent starts. The
+# Claude path makes it for the --add-dir grant (claude_add_dirs_flag); every
+# other harness used to get it only at the first steer, and jobqueue refuses a
+# completion-notice target that does not exist yet, so a fresh worker's first
+# detached job lost its job-finished notice.
+mkdir -p "$STATE_REAL/$ID.inbox/handled" || {
+  echo "error: could not create the steering inbox for $ID under $STATE_REAL; the worker was not launched" >&2
+  exit 1
+}
 # Every launch also exports the absolute path of this task's steering inbox, so
 # the constant doorbell line (bin/fm-task-inbox-lib.sh) can name
 # "$FM_TASK_INBOX" instead of a path that grows with the home's depth. Like the

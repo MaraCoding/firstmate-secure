@@ -221,6 +221,11 @@ test_launch_exports_task_inbox() {
     want="$(cd "$HOME_DIR/state" && pwd -P)/$id.inbox"
     assert_equals "$want" "$seen" \
       "a $kind agent must start with FM_TASK_INBOX set to its absolute steering inbox"
+    # The directory must exist before the agent starts, whatever the harness:
+    # jobqueue refuses a completion-notice target that does not exist, and only
+    # the Claude --add-dir path used to create it at spawn.
+    [ -d "$want/handled" ] \
+      || fail "a $kind spawn must create its steering inbox and handled/ before launch"
   done
   pass "ship and secondmate launches export their absolute steering inbox as FM_TASK_INBOX"
 }
