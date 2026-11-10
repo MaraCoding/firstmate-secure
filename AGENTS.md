@@ -127,6 +127,7 @@ Reconcile only this home's recorded direct reports and their recorded backend in
 For an ordinary direct report whose endpoint is dead or metadata has no window, load `stuck-crewmate-recovery` and preserve the recorded worktree and unlanded work while reconciling ownership.
 For a dead secondmate direct report, load `secondmate-provisioning` and reconcile only that secondmate, never its whole child tree from the main home.
 Each secondmate reconciles work already in its own home and then idles; recovery never authorizes it to invent work.
+After a host restart, run `bin/fm-host-recover.sh` before steering anyone: once per boot it starts the job queue and relaunches each direct report whose endpoint is dead or holds an agent the fleet did not launch ([`docs/agent-control.md`](docs/agent-control.md#fleet-wide-pause-resume-and-host-recovery)).
 
 If `state/.afk` is present, load `/afk` in away mode or `/quiet` in quiet mode (`bin/fm-wake-lib.sh`'s `fm_afk_mode`); where its daemon runs, let the daemon own supervision rather than arming another cycle, and on Pi keep the ordinary supervision session, which runs in both postures with main parked while the record exists.
 Surface only captain-relevant decisions, review-ready PRs, failures, and credential needs; otherwise resume the emitted supervision protocol silently.
@@ -223,6 +224,7 @@ A remote secondmate steer rides the same durable-inbox model through the remote 
 When a steer answers an open keyed decision or blocker, pass `fm-send`'s `--resolve-key` so the answer itself closes that decision record at answer time, identically for local and remote workers (contract: `bin/fm-send.sh` header).
 `fm-send` is the data plane for text the worker should read; never use its key or text paths for interrupt, exit, or other lifecycle control, because routing-marked lifecycle text becomes chat the worker reasons about instead of executing.
 Drive a worker's lifecycle through `bin/fm-control.sh <task-id> interrupt|exit|relaunch`, which owns the per-runtime mechanics, verifies each action, and never tears down or discards anything ([`docs/agent-control.md`](docs/agent-control.md)).
+Pause and resume the whole fleet only with `bin/fm-fleet-pause.sh` and `bin/fm-fleet-resume.sh` (`--dry-run` shows the steps), never step by step by hand; while `state/captain-pause.flag` exists the fleet is paused, so dispatch nothing, steer no one, and leave the job queue paused until the captain ends the pause.
 A secondmate's routed reply returns through status or a document pointer, not by firstmate peeking into its chat.
 For the parent-owned correlation, recovery, and escalation contract on marked secondmate requests, see `bin/fm-pending-reply-lib.sh`.
 Before steering a ship or scout, and whenever its direction changes, run `bin/fm-context-check.sh <task>`; past the crew context limit (`config/crew-context-limit`, default 250000 tokens) end the session and respawn it with a handoff brief instead of steering, and `fm-send` refuses such a steer unless given `--allow-large-context`.

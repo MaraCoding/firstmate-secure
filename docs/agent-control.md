@@ -159,6 +159,36 @@ The worktree and the task's records are unaffected either way.
 - If the launch owner already published the new record but no running agent can be confirmed, the new record is kept: the task is recorded on the new harness with no agent confirmed, which is exactly what recovery reconciles.
   Rewriting it back to the old harness would be a second, worse inaccuracy.
 
+## Fleet-wide pause, resume, and host recovery
+
+Three commands compose the verbs above for one home's whole fleet, so pausing it, resuming it, and bringing it back after a host restart are each one command with no model call.
+Each takes `--dry-run`, which prints every command it would run and changes nothing, and each is finished by running it again after a partial failure.
+The command headers own the exact steps, and [`bin/fm-fleet-pause-lib.sh`](../bin/fm-fleet-pause-lib.sh) owns the records they share.
+
+| Command | What it does |
+| --- | --- |
+| [`bin/fm-fleet-pause.sh`](../bin/fm-fleet-pause.sh) `[--reason <text>]` | Writes the pause record first, saves the job queue's live jobs, pauses the queue (which cancels them), interrupts each mid-turn ship and scout, and marks each one waiting. It sends no message to any worker. |
+| [`bin/fm-fleet-resume.sh`](../bin/fm-fleet-resume.sh) `[--stagger-secs <n>] [--force]` | Starts the queue daemon when it is down, resumes the queue and confirms it from the snapshot the queue publishes, removes the pause record, then sends each marked worker one steer naming the jobs the pause cut and closes its mark. |
+| [`bin/fm-host-recover.sh`](../bin/fm-host-recover.sh) `[--force]` | Once per boot: starts the queue daemon, pauses the queue again while a pause record stands, and relaunches each worker whose endpoint is dead or holds an agent the fleet did not launch, with a note naming its lost jobs. |
+
+The pause record is the one-line `state/captain-pause.flag`.
+A home's own alarm guard or watchdog may read it, and they depend only on the file existing and on its age, which running the pause again refreshes.
+`state/fleet-pause/` holds what the three commands keep for each other: the jobs the pause cut, the turns it interrupted, the timers it stopped, and the boot the recovery last finished for.
+
+A paused worker carries `paused [key=fleet-pause]: ... until <UTC>` in its status log.
+That is an ordinary declared wait, so the watcher needs no rule of its own for it, and it stays open until the resume appends `resolved [key=fleet-pause]`, which is how the resume knows whom to steer.
+An idle worker that lost no job to the pause and whose newest status already reads `done`, `failed`, `needs-decision`, `blocked`, or `captain-held` is left unmarked, because the watcher keeps such a pane quiet from that event and a mark would replace it.
+
+The resume skips a task held for the captain and never steers an agent the fleet did not launch.
+After a host restart during a pause it refuses until the recovery has run for the new boot.
+
+An agent the fleet did not launch is what a terminal backend leaves when it restores panes after a restart and re-runs the bare harness: the endpoint still classifies as a live agent, but the process has none of the environment, flags, or working directory `bin/fm-spawn.sh` gave it.
+The recovery tells the two apart without a backend write: no agent process carries the task's launch marker (`FM_TASK_ID`, or `FM_TASK_INBOX` for a second mate), or that process sits outside the recorded worktree, or the task's busy generation is older than the boot.
+An endpoint it cannot classify is reported and left alone, and a dead worker whose newest status is `done` or `failed` is not relaunched.
+
+None of the three reaches into a second mate's home: a second mate is neither paused nor resumed from its parent, and its crew is recovered in its own home.
+The recovery relaunches a local second mate that is dead or not fleet-launched, except while the fleet is paused, and prints the command for a remote one.
+
 ## Fail-closed boundaries
 
 - Targeting is exact.
