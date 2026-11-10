@@ -5652,7 +5652,36 @@ EOF
     # Written OUTSIDE the worktree: pi's project-trust gate fires on any extension
     # loaded from inside the project (verified live), but an explicit -e path
     # elsewhere loads without a dialog. Lives in state/, cleaned by teardown.
-    cat >"$STATE/$ID.pi-ext.ts" <<EOF
+    #
+    # config/crew-context-compact-at (docs/configuration.md "Crew context
+    # limit" owns the operator contract) is an opt-in token threshold baked
+    # into a ship or scout's extension at launch; FM_CREW_CONTEXT_COMPACT_AT
+    # overrides the file for one launch. With neither set the extension below
+    # is byte-identical to the one written before the knob existed. A malformed
+    # value starts the worker without the bound and says so: this is a cost
+    # knob, and refusing here would strand a relaunch whose old agent has
+    # already been stopped.
+    pi_compact_at=
+    pi_compact_src=
+    if [ "$KIND" != secondmate ]; then
+      if [ -n "${FM_CREW_CONTEXT_COMPACT_AT:-}" ]; then
+        pi_compact_at=$FM_CREW_CONTEXT_COMPACT_AT
+        pi_compact_src=FM_CREW_CONTEXT_COMPACT_AT
+      elif [ -f "$CONFIG/crew-context-compact-at" ]; then
+        pi_compact_at=$(tr -d '[:space:]' 2>/dev/null <"$CONFIG/crew-context-compact-at") || pi_compact_at=
+        pi_compact_src=config/crew-context-compact-at
+      fi
+      if [ -n "$pi_compact_src" ]; then
+        case "$pi_compact_at" in
+        '' | *[!0-9]* | 0*)
+          echo "warning: $pi_compact_src must hold one positive integer token count; ignoring it and launching $ID without automatic context compaction" >&2
+          pi_compact_at=
+          ;;
+        esac
+      fi
+    fi
+    {
+      cat <<EOF
 // Firstmate semantic busy-state events + turn-end notification; written by
 // fm-spawn under the contract owned by bin/fm-busy-lib.sh.
 // Semantic state: "agent_start" -> busy when a low-level agent run begins;
@@ -5709,8 +5738,42 @@ export default function (pi: any) {
       "progress", "$STATE_REAL", "$ID", "--gen", "$BUSY_GEN",
     ]);
   });
-}
 EOF
+      if [ -n "$pi_compact_at" ]; then
+        cat <<EOF
+  // Opt-in context bound (config/crew-context-compact-at, baked in at launch).
+  // Past the threshold, ask Pi to compact - but only once Pi has settled idle.
+  // ctx.compact() is Pi's manual compaction: it aborts a run in flight and
+  // never resumes it (verified against pi 0.85.1's AgentSession), so the
+  // turn_end trigger of Pi's shipped trigger-compact example would strand a
+  // working crewmate mid-task. Settled and idle, there is nothing to
+  // interrupt, and Pi's TUI queues a steer typed while it compacts (read in
+  // pi 0.85.1's source). It cannot loop: a settle needs a new prompt, Pi
+  // reports no token count between a compaction and its next model response,
+  // and the interval caps requests when a compaction fails. Registered after
+  // the handler above, so the idle state is published first.
+  const compactAtTokens = $pi_compact_at;
+  const compactMinIntervalMs = 600000;
+  let lastCompactAt = 0;
+  pi.on("agent_settled", (_event: any, ctx: any) => {
+    try {
+      if (!ctx || typeof ctx.compact !== "function" || typeof ctx.getContextUsage !== "function") return;
+      if (typeof ctx.isIdle === "function" && !ctx.isIdle()) return;
+      const usage = ctx.getContextUsage();
+      const tokens = usage ? usage.tokens : null;
+      if (typeof tokens !== "number" || !(tokens > compactAtTokens)) return;
+      const now = Date.now();
+      if (now - lastCompactAt < compactMinIntervalMs) return;
+      lastCompactAt = now;
+      ctx.compact();
+    } catch {
+      // Best-effort: the bound must never break this extension's lifecycle events.
+    }
+  });
+EOF
+      fi
+      printf '}\n'
+    } >"$STATE/$ID.pi-ext.ts"
     ;;
   omp)
     # Written OUTSIDE the worktree like Pi's, but for a different reason: omp

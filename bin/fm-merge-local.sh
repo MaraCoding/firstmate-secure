@@ -120,6 +120,22 @@ if ! git -C "$PROJ" merge-base --is-ancestor "$DEFAULT" "$BRANCH"; then
   exit 1
 fi
 
+# Landing proof (opt-in; bin/fm-landing-proof.sh owns the contract and the
+# home-local config/landing-proof the rules). OFF costs one file test and leaves
+# this script on its old path. ON, the branch tip is resolved once, checked, and
+# that exact commit is what the fast-forward below takes, so the commit that
+# lands is the commit that was proven even if the branch moves meanwhile.
+MERGE_REF=$BRANCH
+LANDING_PROOF_TIP=
+if [ -e "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/landing-proof" ]; then
+  LANDING_PROOF_TIP=$(git -C "$PROJ" rev-parse --verify --quiet "refs/heads/$BRANCH^{commit}") \
+    || { echo "error: cannot resolve branch $BRANCH in $PROJ" >&2; exit 1; }
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    "$SCRIPT_DIR/fm-landing-proof.sh" gate "$ID" --commit "$LANDING_PROOF_TIP" \
+    || { echo "error: local merge refused: landing proof check failed for $ID" >&2; exit 1; }
+  MERGE_REF=$LANDING_PROOF_TIP
+fi
+
 before=$(git -C "$PROJ" rev-parse --short "$DEFAULT")
 hold_status=0
 FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
@@ -136,11 +152,22 @@ case "$hold_status" in
     ;;
 esac
 merge_status=0
-git -C "$PROJ" merge --ff-only "$BRANCH" >/dev/null || merge_status=$?
+git -C "$PROJ" merge --ff-only "$MERGE_REF" >/dev/null || merge_status=$?
 fm_lock_release "$MERGE_CONTROL_LOCK" || true
 MERGE_CONTROL_LOCK=
 [ "$merge_status" -eq 0 ] || exit "$merge_status"
 after=$(git -C "$PROJ" rev-parse --short "$DEFAULT")
+if [ -n "$LANDING_PROOF_TIP" ]; then
+  # The landing-history line outlives the per-task proof record; a failed
+  # append must not turn a merge that already landed into a reported failure.
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    "$SCRIPT_DIR/fm-landing-proof.sh" landed "$ID" --commit "$LANDING_PROOF_TIP" || true
+  # Only the proven commit landed. Say so when the branch has since moved, so
+  # the line below is not read as "everything on the branch is in".
+  landed_tip=$(git -C "$PROJ" rev-parse --verify --quiet "refs/heads/$BRANCH^{commit}" 2>/dev/null || true)
+  [ "$landed_tip" = "$LANDING_PROOF_TIP" ] \
+    || echo "note: $BRANCH moved after its landing proof was checked; only $(printf '%s' "$LANDING_PROOF_TIP" | cut -c1-12) landed" >&2
+fi
 # Opt-in fleet activity ledger (docs/fleet-ledger.md); off costs one file test.
 [ ! -e "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/fleet-ledger" ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE "$SCRIPT_DIR/fm-fleet-ledger.sh" merged "$ID" local || true
 echo "merged $BRANCH into local $DEFAULT ($before -> $after) in $PROJ"

@@ -14,14 +14,19 @@
 #   is a `session` header, Claude otherwise).
 # Context is the last real assistant turn's prompt size: Pi input + cacheRead +
 # cacheWrite; Claude input_tokens + cache_read_input_tokens +
-# cache_creation_input_tokens. Only the file's tail is scanned.
+# cache_creation_input_tokens. Only the file's tail is scanned. A Pi session
+# compacted since that turn is unknown, not over: the turn measured the context
+# the compaction replaced, and Pi itself reports no size until its next model
+# response.
 # Limit: --limit, else FM_CREW_CONTEXT_LIMIT, else config/crew-context-limit
 # (one positive integer), else 250000. Past it, end the session and respawn with
 # a handoff brief instead of steering (AGENTS.md section 7); fm-send.sh refuses
-# a text steer to a ship or scout past it unless given --allow-large-context.
+# a text steer to a ship or scout past it unless given --allow-large-context,
+# and records each use of that flag in state/context-bypass.log.
 # Output, one line:
 #   context: <tokens> · limit: <limit> · over: <yes|no> · harness: <h> · model: <m> · at: <ts> · session: <file>
-# or `context: unknown · <reason>` when no session or usage can be found.
+# or `context: unknown · limit: <limit> · <reason>` when no session or usage
+# can be found.
 # Exit: 0 at or under the limit, 3 over it, 4 unknown, 2 usage error.
 set -u
 
@@ -78,7 +83,7 @@ if [ -z "$LIMIT" ]; then
 fi
 fm_context_valid_limit "$LIMIT" || { echo "error: context limit must be a positive integer: $LIMIT" >&2; exit 2; }
 
-unknown() { printf 'context: unknown · %s\n' "$1"; exit 4; }
+unknown() { printf 'context: unknown · limit: %s · %s\n' "$LIMIT" "$1"; exit 4; }
 
 meta_get() {  # <meta> <key>: last value, empty when absent
   sed -n "s/^$2=//p" "$1" 2>/dev/null | tail -n 1
@@ -150,24 +155,31 @@ else
   [ -n "$SESSION" ] || unknown "no $HARNESS session for $WT written since the task's spawn"
 fi
 
-# Scan the tail newest-first for the last assistant row with real usage.
+# Scan the tail newest-first for the last assistant row with real usage. A Pi
+# compaction entry is a row too: one newer than that turn means the turn
+# measured context the compaction has since replaced (header).
+SCAN=(-e '"usage"')
 if [ "$HARNESS" = pi ]; then
+  SCAN=(-e '"usage"' -e '"compaction"')
   # shellcheck disable=SC2016 # jq program: $-names are jq bindings, not shell expansions.
-  FILTER='select(.type == "message" and .message.role == "assistant" and (.message.usage | type) == "object")
-    | .message as $m | (($m.usage.input // 0) + ($m.usage.cacheRead // 0) + ($m.usage.cacheWrite // 0)) as $c
-    | select($c > 0) | "\($c)\t\($m.model // "?")\t\(.timestamp // "?")"'
+  FILTER='if .type == "compaction" then "compacted\t\(.tokensBefore // "?")\t\(.timestamp // "?")"
+    else (select(.type == "message" and .message.role == "assistant" and (.message.usage | type) == "object")
+      | .message as $m | (($m.usage.input // 0) + ($m.usage.cacheRead // 0) + ($m.usage.cacheWrite // 0)) as $c
+      | select($c > 0) | "\($c)\t\($m.model // "?")\t\(.timestamp // "?")") end'
 else
   # shellcheck disable=SC2016 # jq program: $-names are jq bindings, not shell expansions.
   FILTER='select(.type == "assistant" and (.isSidechain | not) and (.message.usage | type) == "object" and .message.model != "<synthetic>")
     | .message as $m | (($m.usage.input_tokens // 0) + ($m.usage.cache_read_input_tokens // 0) + ($m.usage.cache_creation_input_tokens // 0)) as $c
     | select($c > 0) | "\($c)\t\($m.model // "?")\t\(.timestamp // "?")"'
 fi
-ROW=$(tac "$SESSION" 2>/dev/null | grep -m 40 '"usage"' | jq -R -r "fromjson? | $FILTER" 2>/dev/null | head -n 1)
+ROW=$(tac "$SESSION" 2>/dev/null | grep -m 40 "${SCAN[@]}" | jq -R -r "fromjson? | $FILTER" 2>/dev/null | head -n 1)
 [ -n "$ROW" ] || unknown "no assistant turn with usage in $SESSION"
 CTX=${ROW%%$'\t'*}
 REST=${ROW#*$'\t'}
 MODEL=${REST%%$'\t'*}
 AT=${REST#*$'\t'}
+# On a compaction row the middle field is the size the compaction replaced.
+[ "$CTX" != compacted ] || unknown "session compacted at $AT from $MODEL tokens, with no assistant turn since: $SESSION"
 OVER=no
 [ "$CTX" -le "$LIMIT" ] || OVER=yes
 printf 'context: %s · limit: %s · over: %s · harness: %s · model: %s · at: %s · session: %s\n' \
