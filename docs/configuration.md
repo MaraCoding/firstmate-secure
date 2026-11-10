@@ -707,6 +707,17 @@ The optional local, gitignored `config/crew-context-limit` file holds one positi
 With the file absent the limit is 250000; `FM_CREW_CONTEXT_LIMIT` overrides the file for one run, and a malformed value is refused rather than guessed.
 `bin/fm-context-check.sh <task>` reports the session's last-turn input tokens for Pi and Claude workers against the limit, and `bin/fm-send.sh` refuses a text steer to a local ship or scout past it unless given `--allow-large-context`; unknown context never blocks.
 The script's header owns session resolution, the measure, and exit codes.
+Each use of `--allow-large-context` on such a steer is recorded: the context is still measured, and one line with the UTC time, task, measured context, limit, and `over=yes|no|unknown` is appended to the size-capped `state/context-bypass.log`, with a note on stderr when the task is over the limit.
+The record never refuses or fails the send, and its measure is time-bounded; `bin/fm-send.sh`'s header owns the format and the bound.
+
+The optional local, gitignored `config/crew-context-compact-at` file holds one positive integer: a token threshold past which a Pi or pi-signed ship or scout compacts its own session, for example `230000`.
+It is off by default: with the file absent, the per-task Pi extension `bin/fm-spawn.sh` writes is unchanged, byte for byte, and Pi compacts only near its model's own context window.
+With the file present, the extension asks Pi to compact once the session's context is past the threshold and Pi has settled idle, at most once every ten minutes; each compaction is summarization work billed to the worker's own model.
+It never compacts mid-run, because Pi's extension-triggered compaction aborts a run in flight and does not resume it, so a single long run can still grow past the threshold until it settles.
+Until the next model response after a compaction, `bin/fm-context-check.sh` reports the session as unknown rather than over, and Pi's terminal interface queues a steer typed while it compacts (read in Pi 0.85.1's source, not yet confirmed in a live pane).
+The threshold is baked in at launch, so a change reaches each worker at its next spawn or relaunch; `FM_CREW_CONTEXT_COMPACT_AT` overrides the file for one launch, which is how to try it on a single worker.
+A malformed value starts the worker without the bound and warns on the spawn's stderr instead of refusing the launch.
+The file is a home-local choice, does not cover secondmates, and is not inherited by secondmate homes; `grep compactAtTokens state/<id>.pi-ext.ts` shows whether a running worker carries the bound.
 
 ## Review tiers (config/review-tiers)
 

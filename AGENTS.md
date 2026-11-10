@@ -225,7 +225,7 @@ When a steer answers an open keyed decision or blocker, pass `fm-send`'s `--reso
 Drive a worker's lifecycle through `bin/fm-control.sh <task-id> interrupt|exit|relaunch`, which owns the per-runtime mechanics, verifies each action, and never tears down or discards anything ([`docs/agent-control.md`](docs/agent-control.md)).
 A secondmate's routed reply returns through status or a document pointer, not by firstmate peeking into its chat.
 For the parent-owned correlation, recovery, and escalation contract on marked secondmate requests, see `bin/fm-pending-reply-lib.sh`.
-Before steering a ship or scout, and whenever its direction changes, run `bin/fm-context-check.sh <task>`; past the crew context limit (`config/crew-context-limit`, default 250000 tokens) end the session and respawn it with a handoff brief instead of steering, and `fm-send` refuses such a steer unless given `--allow-large-context`.
+Before steering a ship or scout, and whenever its direction changes, run `bin/fm-context-check.sh <task>`; past the crew context limit (`config/crew-context-limit`, default 250000 tokens) end the session and respawn it with a handoff brief instead of steering, and `fm-send` refuses such a steer unless given `--allow-large-context`, each use of which is recorded in `state/context-bypass.log`.
 When the captain adds or changes an ask mid-task, append the captain's words without added speaker labels or direct address to that brief's `## Captain's intent` and relay those words to the worker; Firstmate build constraints stay in `## Firstmate spec` or the steer.
 Supervise all live work under section 8.
 
