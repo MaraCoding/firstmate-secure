@@ -91,6 +91,7 @@ Each effective `FM_HOME` contains private operational directories.
 - Private secondmate config-reread generations with their retry and quarantine state.
 - Per-task steering-inbox records under `state/<id>.inbox/` (`bin/fm-task-inbox-lib.sh`).
 - Parent-owned secondmate pending-reply records under `state/pending-replies/` (`bin/fm-pending-reply-lib.sh`).
+- The fleet pause record `state/captain-pause.flag` and the pause, resume, and host-recovery records under `state/fleet-pause/` (`bin/fm-fleet-pause-lib.sh`).
 
 `config/` holds local gitignored operating choices, including explicit extension bindings under `config/extensions.d/`.
 
@@ -727,6 +728,14 @@ The optional local, gitignored `config/review-tiers` is read before those defaul
 A rules file that cannot be read, or that holds a malformed line, stops the script with exit 1 instead of yielding `none`.
 The file is a home-local choice and is not inherited by secondmate homes.
 [`bin/fm-review-tier.sh`](../bin/fm-review-tier.sh)'s header owns the line format, the glob rules, what is counted, and the output, and the `ship-landing` skill owns what firstmate does with each tier.
+
+## Fleet pause timers (config/fleet-pause-timers)
+
+The optional local, gitignored `config/fleet-pause-timers` file lists systemd user units, one per line with `#` comments, that `bin/fm-fleet-pause.sh` stops when they are active.
+With the file absent a pause stops none.
+The pause records the units it actually stopped under `state/fleet-pause/`, and `bin/fm-fleet-resume.sh` restarts exactly those.
+The file is a per-machine choice and is not inherited by secondmate homes.
+[`docs/agent-control.md`](agent-control.md#fleet-wide-pause-resume-and-host-recovery) describes the fleet-wide pause, resume, and host-recovery commands and their records.
 
 ## PR-ready line after green (config/ready-after-green)
 
@@ -2733,7 +2742,9 @@ FM_STATE_OVERRIDE=       # alternate state dir, mainly for tests
 FM_DATA_OVERRIDE=        # alternate data dir, mainly for tests
 FM_PROJECTS_OVERRIDE=    # alternate projects dir, mainly for tests
 FM_CONFIG_OVERRIDE=      # alternate config dir, mainly for tests
-FM_PROC_ROOT_OVERRIDE=   # alternate /proc root for Linux process-identity reads in fm-wake-lib.sh and fm-teardown.sh, mainly for tests
+FM_PROC_ROOT_OVERRIDE=   # alternate /proc root for Linux process-identity reads in fm-wake-lib.sh and fm-teardown.sh and for the boot, queue-daemon, and launch-marker reads in fm-fleet-pause-lib.sh, mainly for tests
+FM_FLEET_PAUSE_HOLD_SECS=43200   # seconds one fleet pause confirmation stays current: the clearing time bin/fm-fleet-pause.sh writes into each worker's wait mark; running the pause again renews it
+FM_FLEET_PAUSE_CGROUP_ROOT=/sys/fs/cgroup   # alternate cgroup root for the user-service memory.reclaim request in bin/fm-fleet-pause.sh, mainly for tests
 FM_BACKEND=             # optional runtime backend override for new spawns; tmux/herdr/zellij/orca/cmux/paseo/rex support ship/scout spawns, codex-app is not accepted
 FM_TRACE_CONTEXT=       # optional trace-context override; see "Trace context propagation"
 FM_TASK_ID=             # internal task-worker marker fm-spawn.sh exports into ship and scout panes, never set by hand; bin/fm-test-run.sh refuses to execute in the repository primary checkout while it is set
