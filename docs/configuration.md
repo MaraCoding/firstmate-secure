@@ -698,6 +698,15 @@ With the file absent the limit is 250000; `FM_CREW_CONTEXT_LIMIT` overrides the 
 `bin/fm-context-check.sh <task>` reports the session's last-turn input tokens for Pi and Claude workers against the limit, and `bin/fm-send.sh` refuses a text steer to a local ship or scout past it unless given `--allow-large-context`; unknown context never blocks.
 The script's header owns session resolution, the measure, and exit codes.
 
+## Review tiers (config/review-tiers)
+
+`bin/fm-review-tier.sh <repo-path> <base-ref> <head-ref>` decides from a diff alone which independent review a finished change needs: `cross-family` when a changed production path matches a cross-family rule, `standard` when one matches a standard rule or the change reaches the size threshold, and `none` otherwise.
+The tracked `config-defaults/review-tiers` holds the default rules: CI workflows, gate configuration, deploy and rollback tooling, container and service definitions, and migrations are cross-family; tests, documentation, generated files, and lock files are not production; and the threshold is 300 changed production lines.
+The optional local, gitignored `config/review-tiers` is read before those defaults, so a home names its own gate, queue, persistence, and shared-runtime paths there: its path rules are tried first, its threshold replaces the default one, and its `nonprod` and `prod` globs add to the defaults'.
+A rules file that cannot be read, or that holds a malformed line, stops the script with exit 1 instead of yielding `none`.
+The file is a home-local choice and is not inherited by secondmate homes.
+[`bin/fm-review-tier.sh`](../bin/fm-review-tier.sh)'s header owns the line format, the glob rules, what is counted, and the output, and the `ship-landing` skill owns what firstmate does with each tier.
+
 ## PR-ready line after green (config/ready-after-green)
 
 The optional local, gitignored `config/ready-after-green` presence flag opts a secondmate home into publishing its child's PR-ready parent line only after the child has reported checks green.
